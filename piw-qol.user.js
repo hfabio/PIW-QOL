@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Poke Idle World - Quality of Life (PIW-QOL)
 // @namespace    http://tampermonkey.net/
-// @version      9.10.15
+// @version      9.11.5
 // @description  Suporte a ícones oficiais via items.json, lógica de valores robusta e tooltips esteticamente alinhadas ao jogo.
 // @author       Desjunior (JulianoCLI)
 // @match        https://poke.idleworld.online/play
@@ -26,6 +26,25 @@
     let lastHuntSocketActivityAt = Date.now();
     let lastAutoReconnectAt = 0;
     let autoReconnectInProgress = false;
+    let autoReconnectWasInHunt = false;
+    let lastAnalyzerXp = null;
+    let lastAnalyzerXpChangeAt = Date.now();
+
+    function isInHuntContext() {
+        if (document.querySelector('[data-guide="capture-bar"], .hunt-ui, .battle-window, .wild-pokemon')) return true;
+        const location = getCurrentHuntLocation?.() || currentHuntSnapshot?.locName || '';
+        if (location && !isCityName(location)) return true;
+        const analyzer = document.querySelector('.ha-window:not(.ha-compare-modal)');
+        return Boolean(analyzer && !isCityName(getLastHunt()));
+    }
+
+    function isHuntProgressMessage(message) {
+        const type = String(message?.type || '').toLowerCase();
+        if (/chat|family|friend|ranking|pong|ping|inventory|pokes-get/.test(type)) return false;
+        if (/exp|xp|defeat|kill|loot|drop|capture|catch|damage|attack/.test(type)) return true;
+        const payload = JSON.stringify(message).toLowerCase();
+        return /"(?:expgained|xpgain|xp|experience|defeated|killed|damage|loot|drops?|reward)"\s*:\s*(?:[1-9]\d*|true|\[|\{)/.test(payload);
+    }
 
     function handleGameSocketMessage(event) {
         let message;
@@ -35,15 +54,17 @@
             return;
         }
         lastSocketMessageAt = Date.now();
-        const messageType = String(message?.type || '');
-        if (/hunt|encounter|spawn|wild|battle|combat|capture|catch|attack|damage|exp|loot|drop|pokes/i.test(messageType)
-            || (document.querySelector('[data-guide="capture-bar"]') && !/chat|family|friend|ranking|pong|ping/i.test(messageType))) {
+        if (isInHuntContext() && isHuntProgressMessage(message)) {
             lastHuntSocketActivityAt = Date.now();
         }
         if (message?.type === 'inventory') latestInventory = message.items || [];
         if (message?.type === 'family') latestFamily = message;
         if (message?.type === 'pokes') {
             latestPokemon = message.list || [];
+            if (updateCachedLeaderPokemon(latestPokemon)) {
+                lastMapRenderSignature = '';
+                setTimeout(buildSimpleList, 0);
+            }
             setTimeout(enhanceCaptureLog, 0);
             setTimeout(enhancePartyQuality, 0);
         }
@@ -96,10 +117,17 @@
     }
 
     setInterval(async () => {
-        if (!isAutoReconnectActive() || autoReconnectInProgress || !document.querySelector('[data-guide="capture-bar"]')) return;
+        const inHunt = isInHuntContext();
+        if (!inHunt) { autoReconnectWasInHunt = false; return; }
+        if (!autoReconnectWasInHunt) {
+            autoReconnectWasInHunt = true;
+            lastHuntSocketActivityAt = Date.now();
+            return;
+        }
+        if (!isAutoReconnectActive() || autoReconnectInProgress) return;
         const now = Date.now();
         const staleFor = now - lastHuntSocketActivityAt;
-        if (!gameSocket || gameSocket.readyState !== NativeWebSocket.OPEN || staleFor < 75000 || now - lastAutoReconnectAt < 90000) return;
+        if (staleFor < 30000 || now - lastAutoReconnectAt < 60000) return;
         lastAutoReconnectAt = now;
         autoReconnectInProgress = true;
         try {
@@ -115,10 +143,11 @@
         } catch (error) {
             console.warn('Falha no auto-reconnect da hunt:', error);
             showScriptNotice(`Não foi possível concluir o auto-reconnect: ${error.message}`, { title: 'Auto-reconnect', isError: true });
+            setTimeout(() => location.reload(), 1500);
         } finally {
             autoReconnectInProgress = false;
         }
-    }, 15000);
+    }, 5000);
 
     async function requestFreshGameEvent(type, requestType, { timeoutMs = 3500, attempts = 2 } = {}) {
         for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -165,6 +194,7 @@
     const STORAGE_DROP_MODE = 'script_drop_mode_v1'; // 'hover', 'icon', 'off'
     const STORAGE_SELL_CONFIRM = 'script_sell_confirm_items_v1';
     const STORAGE_SELL_LOCKS = 'script_sell_locks_v1';
+    const STORAGE_NATIVE_ITEM_LOCKS = 'script_native_item_locks_v1';
     const STORAGE_DEX_FAST_TRAVEL = 'script_dex_fast_travel_v1';
     const STORAGE_GUARD_LEGENDARY = 'script_guard_legendary_v1';
     const STORAGE_GUARD_SELL_LOCK = 'script_guard_sell_lock_v1';
@@ -257,6 +287,8 @@
     let cachedTrainerLevel = null;
     let trainerLevelPromise = null;
     let lastMapRenderSignature = '';
+    let cachedLeaderPokemonName = '';
+    let cachedLeaderPokemonTypes = [];
     const globalCreatureApiData = new Map();
     const globalItemApiData = new Map();
     const globalHuntMarkerData = new Map();
@@ -375,23 +407,16 @@
 
     function getMapFilters() {
         const fallback = {
-            sort: 'price_desc',
+            sort: '',
             type: '',
             access: 'all',
             captured: ''
         };
-        try {
-            const parsed = JSON.parse(localStorage.getItem(STORAGE_MAP_FILTERS) || 'null');
-            return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-                ? { ...fallback, ...parsed }
-                : fallback;
-        } catch {
-            return fallback;
-        }
+        return fallback;
     }
 
     function setMapFilters(filters) {
-        localStorage.setItem(STORAGE_MAP_FILTERS, JSON.stringify(filters));
+        localStorage.removeItem(STORAGE_MAP_FILTERS);
     }
 
     function simplifyNativeMapControls(mapWindow) {
@@ -431,10 +456,10 @@
         return null;
     }
 
-    function loadTrainerLevel() {
+    function loadTrainerLevel(force = false) {
         const domLevel = readTrainerLevelFromDOM();
         if (domLevel) cachedTrainerLevel = domLevel;
-        if (cachedTrainerLevel !== null || trainerLevelPromise) {
+        if (!force && (cachedTrainerLevel !== null || trainerLevelPromise)) {
             return trainerLevelPromise || Promise.resolve(cachedTrainerLevel);
         }
         trainerLevelPromise = gameApiRequest('/api/characters/me')
@@ -484,6 +509,50 @@
             unsubscribe = gameContext.subscribe('pokes', message => finish(message?.list));
             gameContext.requestPokes();
         });
+    }
+
+    function getGameContextFromDOM() {
+        const hudElement = document.querySelector('.phud-name') || document.querySelector('.phud');
+        const fiberKey = hudElement && Object.keys(hudElement).find(key => key.startsWith('__reactFiber$'));
+        let fiber = fiberKey ? hudElement[fiberKey] : null;
+        for (let depth = 0; fiber && depth < 40; depth++, fiber = fiber.return) {
+            const value = fiber.memoizedProps?.value;
+            if (value && typeof value.subscribe === 'function') return value;
+        }
+        return null;
+    }
+
+    async function toggleNativeLock(kind, entry) {
+        const context = getGameContextFromDOM();
+        const id = entry?.id ?? entry?.capturedId ?? entry?.itemId;
+        const nextLocked = !isNativeLocked(entry);
+        if (kind === 'item') {
+            const itemId = Number(entry?.itemId ?? entry?.id);
+            if (!Number.isFinite(itemId)) throw new Error('O item não possui um identificador válido.');
+            await gameApiRequest('/api/game/item/lock', {
+                method: 'POST',
+                body: JSON.stringify({ itemId, locked: nextLocked })
+            });
+            entry.locked = nextLocked;
+            entry.isLocked = nextLocked;
+            setNativeItemLock(entry.name, nextLocked);
+            return nextLocked;
+        }
+        const candidates = kind === 'pokemon'
+            ? ['togglePokeLock', 'togglePokemonLock', 'setPokeLocked', 'lockPoke']
+            : [];
+        const method = candidates.find(name => typeof context?.[name] === 'function');
+        if (method) {
+            await context[method](id, nextLocked);
+        } else {
+            const sent = sendGameMessage({ type: kind === 'pokemon' ? 'poke-lock' : 'item-lock', [kind === 'pokemon' ? 'pokeId' : 'itemId']: id, locked: nextLocked });
+            if (!sent) throw new Error('A ação nativa de cadeado não está disponível.');
+        }
+        entry.locked = nextLocked;
+        return nextLocked;
+    }
+    function isNativeLocked(entry) {
+        return Boolean(entry?.locked ?? entry?.isLocked ?? entry?.protected ?? entry?.sellLocked);
     }
 
     async function getCompleteLeaderPokemon() {
@@ -583,6 +652,26 @@
         return POKEMON_ITEM_ICONS[id] ? `/assets/pokeitems/${POKEMON_ITEM_ICONS[id]}.png` : '';
     }
 
+    function updateCachedLeaderPokemon(pokemonList) {
+        const leader = pokemonList.find(pokemon => pokemon.leader)
+            || pokemonList.filter(pokemon => pokemon.team).sort((a, b) => Number(a.slot ?? 99) - Number(b.slot ?? 99))[0];
+        if (!leader) return false;
+        const name = normalizePokemonName(leader.name || leader.pokemonName || '');
+        const explicitTypes = [leader.type1, leader.type2, ...(Array.isArray(leader.types) ? leader.types : [])]
+            .filter(Boolean).map(type => String(type).toLowerCase());
+        const types = explicitTypes.length ? [...new Set(explicitTypes)] : (POKEMON_TYPES[name] || []);
+        const changed = name !== cachedLeaderPokemonName || JSON.stringify(types) !== JSON.stringify(cachedLeaderPokemonTypes);
+        cachedLeaderPokemonName = name;
+        cachedLeaderPokemonTypes = types;
+        return changed;
+    }
+
+    async function refreshActivePokemonForMap() {
+        let pokemonList = await requestPokemonTeamFromGameContext(2200);
+        if (!pokemonList.length) pokemonList = Array.isArray(latestPokemon) ? latestPokemon : [];
+        return updateCachedLeaderPokemon(pokemonList);
+    }
+
     function normalizeGameItemIcon(icon) {
         if (!icon) return '';
         if (/^(https?:)?\//.test(icon)) return icon;
@@ -651,7 +740,8 @@
         ghost: { normal: 0, psychic: 2, ghost: 2, dark: 0.5 },
         dragon: { dragon: 2, steel: 0.5 },
         dark: { fighting: 0.5, psychic: 2, ghost: 2, dark: 0.5 },
-        steel: { fire: 0.5, water: 0.5, electric: 0.5, ice: 2, rock: 2, steel: 0.5 }
+        steel: { fire: 0.5, water: 0.5, electric: 0.5, ice: 2, rock: 2, steel: 0.5, fairy: 2 },
+        fairy: { fire: 0.5, fighting: 2, poison: 0.5, dragon: 2, dark: 2, steel: 0.5 }
     };
 
     const BASE_POKEMON_TYPES = {
@@ -675,7 +765,7 @@
                 if (creaturesList.length > 0) {
                     const fetchedTypes = {};
                     creaturesList.forEach(poke => {
-                        const pokeName = (poke.name || '').toLowerCase().trim();
+                        const pokeName = normalizePokemonName(poke.name || '');
                         const t1 = poke.type1 || poke.type_1;
                         const t2 = poke.type2 || poke.type_2;
                         if (pokeName && t1) {
@@ -684,6 +774,8 @@
                             fetchedTypes[pokeName] = types;
                         }
                         globalCreatureApiData.set(pokeName, poke);
+                        const apiAliases = [poke.slug, poke.key, poke.apiName, poke.displayName].filter(Boolean);
+                        apiAliases.forEach(alias => globalCreatureApiData.set(normalizePokemonName(alias), poke));
                     });
                     POKEMON_TYPES = { ...BASE_POKEMON_TYPES, ...fetchedTypes };
                     buildSimpleList();
@@ -748,12 +840,30 @@
         return applyOutlandModifier(bestMult !== null ? bestMult : 1.0);
     }
 
+    const POKEMON_NAME_ALIASES = {
+        nidoranfe: 'nidoran-f', 'nidoran female': 'nidoran-f', 'nidoran♀': 'nidoran-f',
+        nidoranma: 'nidoran-m', 'nidoran male': 'nidoran-m', 'nidoran♂': 'nidoran-m',
+        farfetchd: "farfetch'd", 'farfetch’d': "farfetch'd"
+    };
+    const TYPE_COLORS = {
+        normal:'#a0aec0', fire:'#f56565', water:'#4299e1', electric:'#ecc94b', grass:'#48bb78',
+        ice:'#76e4f7', fighting:'#c05640', poison:'#9f7aea', ground:'#b7791f', flying:'#90cdf4',
+        psychic:'#ed64a6', bug:'#9ae640', rock:'#a67c52', ghost:'#6b46c1', dragon:'#805ad5',
+        dark:'#4a5568', steel:'#cbd5e0', fairy:'#fbb6ce'
+    };
+
+    function normalizePokemonName(name) {
+        const normalized = String(name || '').toLowerCase().normalize('NFKD')
+            .replace(/[\u0300-\u036f]/g, '').replace(/[._]/g, ' ').replace(/\s+/g, ' ').trim();
+        return POKEMON_NAME_ALIASES[normalized] || normalized;
+    }
+
     function getCleanHuntName(huntName) {
         if (!huntName) return '';
-        return huntName.toLowerCase()
+        return normalizePokemonName(huntName
             .replace(/\[.*?\]/g, '')
             .replace(/\(.*\)/g, '')
-            .trim();
+            .trim());
     }
 
     function getDefenderTypes(huntName) {
@@ -766,7 +876,7 @@
             if (POKEMON_TYPES[subName]) return POKEMON_TYPES[subName];
             if (POKEMON_TYPES[words[i]]) return POKEMON_TYPES[words[i]];
         }
-        return ["normal"];
+        return [];
     }
 
     // --- PROCESSAMENTO DE DROPS COM ÍCONES REAIS DO ITEMS.JSON ---
@@ -817,11 +927,22 @@
                 }
 
                 const iconHTML = customImgHTML || resolveItemIcon(itemName);
+                const itemData = globalItemApiData.get(String(itemName).toLowerCase().trim()) || d || {};
+                const rarity = String(itemData.rarity || itemData.tier || '').toLowerCase();
+                const rawChance = Number(d?.chance ?? d?.dropChance ?? d?.dropRate ?? d?.rate ?? d?.probability ?? itemData.dropChance ?? itemData.chance);
+                const chancePercent = Number.isFinite(rawChance) ? (rawChance <= 1 ? rawChance * 100 : rawChance) : null;
+                const chanceRarity = chancePercent === null ? 'common' : chancePercent <= .1 ? 'legendary'
+                    : chancePercent <= 1 ? 'epic' : chancePercent <= 5 ? 'rare' : chancePercent <= 20 ? 'uncommon' : 'common';
+                const resolvedRarity = rarity || chanceRarity;
+                const rarityColor = resolvedRarity.includes('legend') ? '#f6c453'
+                    : resolvedRarity.includes('epic') ? '#d6a2ff'
+                        : resolvedRarity.includes('rare') ? '#63b3ed'
+                            : resolvedRarity.includes('uncommon') ? '#68d391' : '#a0aec0';
 
                 return `
                     <div style="display:flex; align-items:center; margin-bottom:6px; font-size:13px; color:#cbd5e0; background:rgba(20,34,45,0.6); padding:4px 8px; border-radius:4px; border:1px solid #1a2d3a;">
                         ${iconHTML}
-                        <span style="font-weight:500; color:#e2e8f0;">${escapeHTML(itemName)}</span>
+                        <span style="font-weight:800; color:${rarityColor} !important;">${escapeHTML(itemName)}</span>
                     </div>
                 `;
             }).join('');
@@ -1040,6 +1161,25 @@
             border-radius: 9px !important;
             overflow: hidden !important;
         }
+        .map-window .script-city-area {
+            min-width: 80px !important;
+            min-height: 46px !important;
+            padding: 8px 16px !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            background: #111c25 !important;
+            color: #e2e8f0 !important;
+            border: 1px solid #263746 !important;
+            border-radius: 10px !important;
+            font: 800 12px var(--piw-game-font) !important;
+            cursor: pointer !important;
+        }
+        .map-window .script-city-area.on {
+            color: #f6c453 !important;
+            border-color: #9f7b35 !important;
+            background: #1b211f !important;
+        }
         .map-window .map-filter-q,
         .map-window input[type="number"],
         .map-window select {
@@ -1059,6 +1199,17 @@
             border-radius: 8px !important;
             box-shadow: none !important;
         }
+        #simple-hunts-container .script-type-badge { color:#fff !important; border:1px solid rgba(255,255,255,.22) !important; font-weight:900 !important; text-shadow:0 1px 2px rgba(0,0,0,.7) !important; }
+        #simple-hunts-container .script-type-normal{background:#718096!important}.script-type-fire{background:#e53e3e!important}.script-type-water{background:#3182ce!important}
+        #simple-hunts-container .script-type-electric{background:#d69e2e!important;color:#161b22!important}.script-type-grass{background:#38a169!important}.script-type-ice{background:#38b2ac!important}
+        #simple-hunts-container .script-type-fighting{background:#c05621!important}.script-type-poison{background:#805ad5!important}.script-type-ground{background:#975a16!important}
+        #simple-hunts-container .script-type-flying{background:#63b3ed!important}.script-type-psychic{background:#d53f8c!important}.script-type-bug{background:#68a819!important}
+        #simple-hunts-container .script-type-rock{background:#8b6b3f!important}.script-type-ghost{background:#553c9a!important}.script-type-dragon{background:#6b46c1!important}
+        #simple-hunts-container .script-type-dark{background:#2d3748!important}.script-type-steel{background:#a0aec0!important;color:#161b22!important}.script-type-fairy{background:#ed64a6!important}
+        #simple-hunts-container .script-effectiveness { font-size:12px!important;font-weight:950!important;padding:4px 9px!important;border-radius:999px!important;border:1px solid currentColor!important; }
+        #simple-hunts-container .script-effectiveness.great { color:#9cffb2!important;background:#123d25!important;box-shadow:0 0 9px rgba(72,187,120,.55)!important; }
+        #simple-hunts-container .script-effectiveness.neutral { color:#cbd5e0!important;background:#293746!important; }
+        #simple-hunts-container .script-effectiveness.bad { color:#ff9b9b!important;background:#481d24!important;box-shadow:0 0 8px rgba(245,101,101,.4)!important; }
         #check-best-hunt-btn {
             min-height: 34px; padding: 6px 11px; border-radius: 8px;
             border: 1px solid #2d6f7d; background: #10303a; color: #75e6f2;
@@ -1481,6 +1632,33 @@
         const locks = getSellLocks().filter(n => n !== itemName);
         localStorage.setItem(STORAGE_SELL_LOCKS, JSON.stringify(locks));
     }
+    function getNativeItemLocks() { return readStoredJSON(STORAGE_NATIVE_ITEM_LOCKS, []); }
+    function setNativeItemLock(itemName, locked) {
+        const normalized = String(itemName || '').trim();
+        let locks = getNativeItemLocks().filter(name => name !== normalized);
+        if (locked && normalized) locks.push(normalized);
+        localStorage.setItem(STORAGE_NATIVE_ITEM_LOCKS, JSON.stringify(locks));
+    }
+    function getItemProtectionReason(entry) {
+        const name = String(entry?.name || '').trim().toLowerCase();
+        if (isNativeLocked(entry) || getNativeItemLocks().some(item => String(item).trim().toLowerCase() === name)) return 'cadeado nativo do Mark de Cerulean';
+        if (getSellLocks().some(item => String(item).trim().toLowerCase() === name)) return 'proteção de venda das configurações do PIW-QOL';
+        return '';
+    }
+    async function togglePortableItemProtection(entry) {
+        const normalizedName = String(entry?.name || '').trim().toLowerCase();
+        const hasLegacyProtection = getSellLocks().some(item => String(item).trim().toLowerCase() === normalizedName);
+        const hasNativeProtection = isNativeLocked(entry)
+            || getNativeItemLocks().some(item => String(item).trim().toLowerCase() === normalizedName);
+        if (hasLegacyProtection) removeSellLock(entry.name);
+        if (hasNativeProtection) {
+            entry.locked = true;
+            return toggleNativeLock('item', entry);
+        }
+        if (hasLegacyProtection) return false;
+        return toggleNativeLock('item', entry);
+    }
+
 
     function isDexFastTravelActive() { return localStorage.getItem(STORAGE_DEX_FAST_TRAVEL) === 'true'; }
     function setDexFastTravel(val) { localStorage.setItem(STORAGE_DEX_FAST_TRAVEL, val ? 'true' : 'false'); }
@@ -1633,8 +1811,24 @@
         });
     }
 
+    const CITY_NAMES = /\b(?:cerulean(?: city)?|pewter(?: city)?|lavender(?: town)?|viridian(?: city)?|cassino|casino)\b/i;
+    function isCityName(name) { return CITY_NAMES.test(String(name || '').replace(/\[[^\]]*]/g, ' ').trim()); }
+    function isCityMarker(marker, name) {
+        const metadata = `${marker?.className || ''} ${marker?.dataset?.type || ''} ${marker?.dataset?.tag || ''} ${marker?.dataset?.category || ''}`;
+        return isCityName(name) || /\b(?:city|cidade|town)\b/i.test(metadata);
+    }
+    function getCityDisplayName(name) {
+        if (/pewter|lavender/i.test(name)) return 'Lavender (Pewter)';
+        if (/viridian/i.test(name)) return 'Viridian';
+        if (/cassino|casino/i.test(name)) return 'Cassino';
+        return 'Cerulean';
+    }
+    function getCityIconStyle(name) {
+        const badge = /cerulean/i.test(name) ? '💧' : /pewter|lavender/i.test(name) ? '🪨' : /viridian/i.test(name) ? '🌿' : '🎰';
+        return `--city-badge:"${badge}";width:38px;height:38px;`;
+    }
     function saveLastHunt(huntName) {
-        if (huntName && huntName !== 'Sem Nome') localStorage.setItem(STORAGE_LAST_HUNT, huntName);
+        if (huntName && huntName !== 'Sem Nome' && !isCityName(huntName)) localStorage.setItem(STORAGE_LAST_HUNT, huntName);
     }
     function getLastHunt() { return localStorage.getItem(STORAGE_LAST_HUNT) || null; }
 
@@ -1685,7 +1879,9 @@
 
     function getActivePokemonName() {
         const nameEl = document.querySelector('.phud-name');
-        return nameEl ? nameEl.textContent.trim().toLowerCase() : '';
+        if (cachedLeaderPokemonName) return cachedLeaderPokemonName;
+        const text = normalizePokemonName(nameEl?.textContent || '');
+        return Object.keys(POKEMON_TYPES).sort((a, b) => b.length - a.length).find(name => text.includes(name)) || text;
     }
 
     function findMappedHunt(huntName) {
@@ -2414,7 +2610,39 @@
             const mapBody = document.querySelector('.map-body');
 
             if (!mapWindow || !mapBody) { isRendering = false; return; }
+            if (mapWindow.classList.contains('invisible-check') || !mapWindow.getClientRects().length) {
+                mapWindow.dataset.scriptMapWasOpen = 'false';
+                isRendering = false;
+                return;
+            }
+            const openedNow = mapWindow.dataset.scriptMapWasOpen !== 'true';
+            mapWindow.dataset.scriptMapWasOpen = 'true';
             simplifyNativeMapControls(mapWindow);
+
+            let viewTabs = document.getElementById('script-map-view-tabs');
+            if (!viewTabs) {
+                viewTabs = document.createElement('div');
+                viewTabs.id = 'script-map-view-tabs';
+                viewTabs.style = 'display:contents;';
+                viewTabs.innerHTML = '<button type="button" data-view="cities" class="map-area script-city-area">Cidades</button>';
+                viewTabs.addEventListener('click', event => {
+                    const button = event.target.closest('[data-view]');
+                    if (!button) return;
+                    mapWindow.dataset.scriptMapView = button.dataset.view;
+                    lastMapRenderSignature = '';
+                    buildSimpleList();
+                });
+                const nativeAreas = mapWindow.querySelectorAll('.map-area');
+                const nativeAreaParent = nativeAreas[0]?.parentElement;
+                (nativeAreaParent || mapBody).appendChild(viewTabs);
+                nativeAreas.forEach(area => area.addEventListener('click', () => {
+                    mapWindow.dataset.scriptMapView = 'hunts';
+                    lastMapRenderSignature = '';
+                    buildSimpleList();
+                }));
+            }
+            const viewMode = mapWindow.dataset.scriptMapView || 'hunts';
+            viewTabs.querySelectorAll('[data-view]').forEach(button => button.classList.toggle('on', button.dataset.view === viewMode));
 
             let customFilterBar = document.getElementById('custom-hunts-filter-bar');
             if (!customFilterBar) {
@@ -2428,6 +2656,7 @@
                 
                 customFilterBar.innerHTML = `
                     <select id="sort-hunts-select" title="Ordenar hunts" style="background:#0c161f;color:#cbd5e0;border:1px solid #1a2d3a;padding:6px 10px;border-radius:6px;outline:none;font-family:inherit;cursor:pointer;">
+                        <option value="">Sem ordenação</option>
                         <option value="price_desc">Preço: Maior -> Menor</option>
                         <option value="price_asc">Preço: Menor -> Maior</option>
                         <option value="eff_desc">Efetividade: Maior Vantagem</option>
@@ -2441,6 +2670,10 @@
                         <option value="accessible">Somente acessíveis</option>
                         <option value="favorites">Favoritas acessíveis</option>
                         <option value="advantage">Com vantagem de tipo</option>
+                        <option value="neutral">Efetividade neutra</option>
+                        <option value="disadvantage">Com desvantagem de tipo</option>
+                        <option value="locked">Hunts bloqueadas</option>
+                        <option value="not_favorites">Não favoritas</option>
                     </select>
                     <button id="check-best-hunt-btn" type="button" title="Abrir o PIW Tools com os dados do Pokémon principal">🧭 ${tr('bestHunt')}</button>
                 `;
@@ -2450,7 +2683,7 @@
                 const typeSelect = customFilterBar.querySelector('#filter-hunts-type');
                 const accessSelect = customFilterBar.querySelector('#filter-hunts-access');
                 const bestHuntButton = customFilterBar.querySelector('#check-best-hunt-btn');
-                sortSelect.value = savedFilters.sort || 'price_desc';
+                sortSelect.value = savedFilters.sort || '';
                 accessSelect.value = savedFilters.access || 'all';
                 bestHuntButton.addEventListener('click', openBestHuntForLeader);
                 customFilterBar.addEventListener('change', () => {
@@ -2493,6 +2726,15 @@
                     buildSimpleList();
                 });
             }
+            customFilterBar.style.display = viewMode === 'cities' ? 'none' : 'grid';
+            captureFilterBar.style.display = viewMode === 'cities' ? 'none' : '';
+            if (openedNow) {
+                customFilterBar.querySelector('#sort-hunts-select').value = '';
+                customFilterBar.querySelector('#filter-hunts-type').value = '';
+                customFilterBar.querySelector('#filter-hunts-access').value = 'all';
+                captureFilterBar.dataset.active = '';
+                captureFilterBar.querySelectorAll('.dex-fbtn').forEach(button => button.classList.remove('on'));
+            }
 
             let simpleContainer = document.getElementById('simple-hunts-container');
             if (!simpleContainer) {
@@ -2506,16 +2748,34 @@
                 mapBody.appendChild(simpleContainer);
             }
 
-            if (mapWindow.classList.contains('invisible-check')) { isRendering = false; return; }
-
             const searchInput = document.querySelector('.map-filter-q');
             const query = searchInput ? searchInput.value.toLowerCase().trim() : '';
 
             const markers = Array.from(document.querySelectorAll('.hunt-marker'));
             const favorites = getFavorites();
             const activePkmn = getActivePokemonName();
-            const activePkmnTypes = POKEMON_TYPES[activePkmn] || ["normal"];
+            const activePkmnTypes = cachedLeaderPokemonTypes.length ? cachedLeaderPokemonTypes : (POKEMON_TYPES[activePkmn] || []);
             const domTrainerLevel = readTrainerLevelFromDOM();
+            if (openedNow) {
+                mapWindow.dataset.scriptLeaderRefreshedAt = String(Date.now());
+                mapWindow.dataset.scriptLeaderRefresh = 'pending';
+                refreshActivePokemonForMap().then(changed => {
+                    delete mapWindow.dataset.scriptLeaderRefresh;
+                    if (changed) {
+                        lastMapRenderSignature = '';
+                        buildSimpleList();
+                    }
+                }).catch(() => { delete mapWindow.dataset.scriptLeaderRefresh; });
+            }
+            if (openedNow) {
+                mapWindow.dataset.scriptLevelRefreshedAt = String(Date.now());
+                mapWindow.dataset.scriptLevelRefresh = 'pending';
+                loadTrainerLevel(true).then(() => {
+                    delete mapWindow.dataset.scriptLevelRefresh;
+                    lastMapRenderSignature = '';
+                    buildSimpleList();
+                });
+            }
             if (cachedTrainerLevel === null && domTrainerLevel === null) {
                 simpleContainer.innerHTML = '<div style="color:#718096;text-align:center;padding:20px;">Carregando nível do treinador…</div>';
                 loadTrainerLevel().then(() => {
@@ -2532,9 +2792,6 @@
             let huntDataList = [];
 
             markers.forEach(marker => {
-                const styleAttr = marker.getAttribute('style') || '';
-                if (styleAttr.includes('display: none') || styleAttr.includes('opacity: 0')) return;
-
                 const nameEl = marker.querySelector('.hunt-name');
                 const lvlEl = marker.querySelector('.hunt-lvl');
                 const iconDiv = marker.querySelector('.hunt-circle div[style*="background-image"]');
@@ -2542,10 +2799,11 @@
                 const name = nameEl ? nameEl.textContent.trim() : 'Sem Nome';
                 const lvlText = lvlEl ? lvlEl.textContent.trim() : 'Nv 1';
                 const requiredLevel = parseInt(lvlText.replace(/\D/g, ''), 10) || 1;
-                const canAccess = trainerLevel >= requiredLevel;
+                const city = isCityMarker(marker, name);
+                const canAccess = city || trainerLevel >= requiredLevel;
                 const isHere = marker.classList.contains('here');
 
-                if (isHere) saveLastHunt(name);
+                if (isHere && !city) saveLastHunt(name);
 
                 const details = extractHuntDetailsFromJSON(name, marker);
                 const defenderTypes = getDefenderTypes(name);
@@ -2554,7 +2812,7 @@
                 const isCaught = globalCaughtPokemonNames.has(getCleanHuntName(name));
 
                 huntDataList.push({
-                    name, lvlText, requiredLevel, canAccess, isHere, isCaught,
+                    name, displayName: city ? getCityDisplayName(name) : name, city, lvlText, requiredLevel, canAccess, isHere, isCaught,
                     sellsFor: details.sellsFor,
                     numericPrice: details.numericPrice,
                     dropsHTML: details.dropsHTML,
@@ -2562,9 +2820,42 @@
                     expText: details.expText,
                     effectiveness,
                     defenderTypes,
-                    iconStyle: iconDiv ? (iconDiv.getAttribute('style') || '') : '',
+                    iconStyle: iconDiv ? (iconDiv.getAttribute('style') || '') : (city ? getCityIconStyle(name) : ''),
                     originalElement: marker,
                     xpEfficiency
+                });
+            });
+
+            // As regiões Orre/Outland desmontam os marcadores de Kanto; cidades vêm do catálogo global.
+            for (const markerData of new Set(globalHuntMarkerData.values())) {
+                const name = getMarkerName(markerData);
+                if (!name || !isCityMarker(markerData, name)
+                    || huntDataList.some(entry => getCleanHuntName(entry.name) === getCleanHuntName(name))) continue;
+                huntDataList.push({
+                    name, displayName: getCityDisplayName(name), city: true, lvlText: '', requiredLevel: 1,
+                    canAccess: true, isHere: false, isCaught: false, sellsFor: 'Indisponível', numericPrice: 0,
+                    dropsHTML: '', experience: 0, expText: '', effectiveness: 1, defenderTypes: [],
+                    iconStyle: getCityIconStyle(name), originalElement: null, xpEfficiency: Infinity
+                });
+            }
+
+            // Favoritos e última hunt podem pertencer a uma região que o jogo desmontou do DOM.
+            [...new Set([...favorites, getLastHunt()].filter(Boolean))].forEach(name => {
+                if (huntDataList.some(hunt => getCleanHuntName(hunt.name) === getCleanHuntName(name)) || isCityName(name)) return;
+                const markerData = findMappedHunt(name);
+                if (!markerData) return;
+                const requiredLevel = Number(markerData.level ?? markerData.requiredLevel ?? markerData.minLevel ?? 1) || 1;
+                const defenderTypes = getDefenderTypes(name);
+                const effectiveness = getOffensiveMultiplier(activePkmnTypes, defenderTypes);
+                const details = extractHuntDetailsFromJSON(name, null);
+                huntDataList.push({
+                    name, displayName: name, city: false, lvlText: `Nv ${requiredLevel}`, requiredLevel,
+                    canAccess: trainerLevel >= requiredLevel, isHere: false,
+                    isCaught: globalCaughtPokemonNames.has(getCleanHuntName(name)),
+                    sellsFor: details.sellsFor, numericPrice: details.numericPrice, dropsHTML: details.dropsHTML,
+                    experience: details.experience, expText: details.expText, effectiveness, defenderTypes,
+                    iconStyle: '', originalElement: null,
+                    xpEfficiency: details.experience && effectiveness ? details.experience / effectiveness : Infinity
                 });
             });
 
@@ -2597,16 +2888,25 @@
                 huntDataList = huntDataList.filter(hunt => hunt.canAccess && favorites.includes(hunt.name));
             } else if (accessFilter === 'advantage') {
                 huntDataList = huntDataList.filter(hunt => hunt.canAccess && hunt.effectiveness > 1);
+            } else if (accessFilter === 'neutral') {
+                huntDataList = huntDataList.filter(hunt => hunt.canAccess && hunt.effectiveness === 1);
+            } else if (accessFilter === 'disadvantage') {
+                huntDataList = huntDataList.filter(hunt => hunt.canAccess && hunt.effectiveness < 1);
+            } else if (accessFilter === 'locked') {
+                huntDataList = huntDataList.filter(hunt => !hunt.canAccess);
+            } else if (accessFilter === 'not_favorites') {
+                huntDataList = huntDataList.filter(hunt => !favorites.includes(hunt.name));
             }
 
             const capturedFilter = document.getElementById('custom-hunts-capture-bar')?.dataset.active || '';
             if (capturedFilter === 'yes') {
-                huntDataList = huntDataList.filter(hunt => hunt.isCaught);
+                huntDataList = huntDataList.filter(hunt => hunt.city || hunt.isCaught);
             } else if (capturedFilter === 'no') {
-                huntDataList = huntDataList.filter(hunt => !hunt.isCaught);
+                huntDataList = huntDataList.filter(hunt => hunt.city || !hunt.isCaught);
             }
+            huntDataList = huntDataList.filter(hunt => viewMode === 'cities' ? hunt.city : !hunt.city);
 
-            const sortVal = document.getElementById('sort-hunts-select')?.value || 'price_desc';
+            const sortVal = document.getElementById('sort-hunts-select')?.value || '';
             huntDataList.sort((a, b) => {
                 const aFav = favorites.includes(a.name);
                 const bFav = favorites.includes(b.name);
@@ -2628,8 +2928,14 @@
                 return a.name.localeCompare(b.name);
             });
 
+            const lastHunt = getLastHunt();
+            if (viewMode === 'hunts' && lastHunt) {
+                const lastIndex = huntDataList.findIndex(hunt => getCleanHuntName(hunt.name) === getCleanHuntName(lastHunt));
+                if (lastIndex > 0) huntDataList.unshift(huntDataList.splice(lastIndex, 1)[0]);
+            }
+
             const renderSignature = JSON.stringify({
-                query, sortVal, selectedType, accessFilter, capturedFilter, trainerLevel, favorites,
+                query, sortVal, selectedType, accessFilter, capturedFilter, trainerLevel, favorites, viewMode, lastHunt,
                 rows: huntDataList.map(hunt => [
                     hunt.name, hunt.lvlText, hunt.canAccess, hunt.isHere, hunt.isCaught,
                     hunt.numericPrice, hunt.experience, hunt.effectiveness
@@ -2649,12 +2955,13 @@
 
             huntDataList.forEach(hunt => {
                 const isFav = favorites.includes(hunt.name);
+                const isLast = viewMode === 'hunts' && getCleanHuntName(hunt.name) === getCleanHuntName(lastHunt);
                 const row = document.createElement('div');
                 row.style = `
                     display: flex; align-items: center; justify-content: space-between;
                     padding: 10px 14px; margin-bottom: 8px;
-                    background: ${!hunt.canAccess ? '#25191d' : (hunt.isHere ? '#163126' : '#14222d')};
-                    border-left: 4px solid ${!hunt.canAccess ? '#e05252' : (hunt.isHere ? '#4caf50' : (isFav ? '#3182ce' : '#273f52'))};
+                    background: ${!hunt.canAccess ? '#25191d' : (hunt.isHere ? '#163126' : (isFav ? '#282116' : '#14222d'))};
+                    border-left: 4px solid ${!hunt.canAccess ? '#e05252' : (hunt.isHere ? '#4caf50' : (isFav ? '#f6c453' : '#273f52'))};
                     border-radius: 4px; color: #e2e8f0; font-size: 14px;
                     cursor: ${hunt.canAccess ? 'pointer' : 'not-allowed'}; position: relative;
                     opacity: ${hunt.canAccess ? '1' : '.72'};
@@ -2666,7 +2973,12 @@
                     align-items: center; justify-content: center; background: #1c3040; border-radius: 50%; margin-right: 14px;
                 `;
 
-                if (hunt.iconStyle) {
+                if (hunt.city) {
+                    const badge = document.createElement('span');
+                    badge.textContent = /cerulean/i.test(hunt.name) ? '💧' : /pewter|lavender/i.test(hunt.name) ? '🪨' : /viridian/i.test(hunt.name) ? '🌿' : '🎰';
+                    badge.style.cssText = 'font-size:25px;filter:drop-shadow(0 2px 3px rgba(0,0,0,.6));';
+                    spriteContainer.appendChild(badge);
+                } else if (hunt.iconStyle) {
                     const sprite = document.createElement('div');
                     sprite.style = hunt.iconStyle;
                     spriteContainer.appendChild(sprite);
@@ -2687,26 +2999,26 @@
                 }
 
                 const typeBadgesHTML = hunt.defenderTypes.map(t => 
-                    `<span style="font-size: 10px; background: #2d3748; color: #cbd5e0; padding: 1px 5px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.5px;">${t}</span>`
+                    `<span class="script-type-badge script-type-${t}" style="font-size:10px;padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:.5px;">${t}</span>`
                 ).join(' ');
 
                 const infoDiv = document.createElement('div');
                 infoDiv.style = 'flex-grow: 1; margin-right: 12px;';
                 infoDiv.innerHTML = `
                     <div style="font-weight: bold; color: ${isFav ? '#3182ce' : '#fff'}; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
-                        <span class="hunt-capture-badge${hunt.isCaught ? '' : ' not-caught'}" title="${hunt.isCaught ? 'Já capturado' : 'Ainda não capturado'}"></span>
-                        ${hunt.name}
-                        <span style="font-size: 11px; background: #243b4d; padding: 2px 6px; border-radius: 4px; color: #cbd5e0;">
+                        ${hunt.city ? '' : `<span class="hunt-capture-badge${hunt.isCaught ? '' : ' not-caught'}" title="${hunt.isCaught ? 'Já capturado' : 'Ainda não capturado'}"></span>`}
+                        ${isLast ? '<span style="color:#f6c453">Última hunt:</span>' : ''} ${hunt.displayName}
+                        ${hunt.city ? '' : `<span style="font-size: 11px; background: #243b4d; padding: 2px 6px; border-radius: 4px; color: #cbd5e0;">
                             ${hunt.lvlText}
-                        </span>
-                        <span style="font-size: 11px; background: #1a365d; color: #63b3ed; padding: 2px 6px; border-radius: 4px;">
+                        </span>`}
+                        ${hunt.city ? '' : `<span class="script-effectiveness ${hunt.effectiveness > 1 ? 'great' : hunt.effectiveness < 1 ? 'bad' : 'neutral'}">
                             ${hunt.effectiveness > 1 ? `⚡ ${hunt.effectiveness}x` : `${hunt.effectiveness}x`}
-                        </span>
-                        ${typeBadgesHTML}
+                        </span>`}
+                        ${hunt.city ? '' : typeBadgesHTML}
                         ${hunt.isHere ? '<span style="font-size: 11px; color: #4caf50; font-weight: bold;">[Aqui]</span>' : ''}
                         ${!hunt.canAccess ? `<span style="font-size:11px;color:#ff8b8b;background:#3b2026;border:1px solid #71313c;padding:2px 6px;border-radius:4px;">🔒 Requer nível ${hunt.requiredLevel}</span>` : ''}
                     </div>
-                    ${bottomInfoHTML}
+                    ${hunt.city ? '' : bottomInfoHTML}
                 `;
 
                 if (dropMode === 'hover' && hunt.dropsHTML) {
@@ -2744,7 +3056,7 @@
                 favBtn.type = 'button';
                 favBtn.innerHTML = isFav ? '★' : '☆';
                 favBtn.style = `
-                    background: none; border: none; color: ${isFav ? '#3182ce' : '#4a5568'};
+                    background: none; border: none; color: ${isFav ? '#f6c453' : '#4a5568'};
                     font-size: 20px; cursor: pointer; padding: 4px 8px; outline: none;
                 `;
                 favBtn.addEventListener('click', (e) => {
@@ -3007,6 +3319,27 @@
         });
     }
 
+    function showScriptQuantityPrompt(message, maximum) {
+        return new Promise(resolve => {
+            const backdrop = document.createElement('div');
+            backdrop.className = 'sell-confirm-backdrop script-quantity-backdrop';
+            backdrop.innerHTML = `<div class="sell-confirm-modal" style="width:min(380px,92vw);">
+                <div class="sell-confirm-title" style="padding:13px 16px;">📦 Quantidade</div><div class="sell-confirm-body" style="display:grid;gap:12px;padding:16px;">
+                <label style="display:grid;gap:7px;color:#aebdca;font-size:13px;"><span>${escapeHTML(message)}</span>
+                <input class="script-quantity-input" type="number" min="1" max="${maximum}" value="${maximum}" style="width:100%;height:40px;box-sizing:border-box;background:#0c161f;color:#f1f5f9;border:1px solid #9f7b35;border-radius:7px;padding:8px 11px;font:700 14px var(--piw-game-font);outline:none;"></label>
+                <div class="sell-confirm-footer" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:0;padding:0;"><button class="sell-confirm-btn yes" type="button" style="width:100%;min-height:38px;">Confirmar</button><button class="sell-confirm-btn no" type="button" style="width:100%;min-height:38px;">Cancelar</button></div>
+                </div></div>`;
+            document.body.appendChild(backdrop);
+            const finish = value => { backdrop.remove(); resolve(value); };
+            backdrop.querySelector('.yes').addEventListener('click', () => {
+                const value = Math.floor(Number(backdrop.querySelector('input').value));
+                finish(Number.isFinite(value) && value >= 1 ? Math.min(maximum, value) : null);
+            });
+            backdrop.querySelector('.no').addEventListener('click', () => finish(null));
+            backdrop.querySelector('input').focus();
+        });
+    }
+
     function showWindowMessage(windowElement, message, isError = false) {
         let messageElement = windowElement.querySelector('.script-window-message');
         if (!messageElement) {
@@ -3073,8 +3406,13 @@
             busy = true;
             try {
                 latestFamily = null;
-                familyData = await requestGameEvent('family', { type: 'family-action', ...payload }, null, 3500);
-                if (!familyData?.family) throw new Error('A família não está mais disponível.');
+                const previousFamilyData = familyData;
+                const response = await requestGameEvent('family', { type: 'family-action', ...payload }, null, 5000);
+                if (!response?.family) {
+                    familyData = previousFamilyData;
+                    throw new Error(response?.message || response?.error || 'O servidor recusou esta transferência.');
+                }
+                familyData = response;
                 if (payload.action === 'item') {
                     latestInventory = null;
                     inventory = await requestFreshGameEvent('inventory', 'inv-get', { timeoutMs: 2500, attempts: 2 });
@@ -3085,6 +3423,9 @@
                 render();
             } catch (error) {
                 showWindowMessage(backdrop.querySelector('.sell-confirm-modal'), error.message || 'Não foi possível mover.', true);
+                const refreshed = await requestFreshGameEvent('family', 'family-get', { timeoutMs: 3500, attempts: 1 }).catch(() => null);
+                if (refreshed?.family) familyData = refreshed;
+                render();
             } finally {
                 busy = false;
             }
@@ -3121,16 +3462,49 @@
                 const action = document.createElement('span');
                 action.style.cssText = 'color:#64c8ff;font-size:12px;font-weight:800;';
                 action.textContent = direction === 'deposit' ? 'Depositar →' : '← Retirar';
-                row.append(icon, label, action);
+                row.append(icon, label);
+                if (kind === 'pokemon') {
+                    const lock = document.createElement('span');
+                    lock.textContent = isNativeLocked(entry) ? '🔒' : '🔓';
+                    lock.title = 'Proteger/desproteger Pokémon';
+                    lock.style.cssText = 'padding:5px;font-size:16px;';
+                    lock.addEventListener('click', async event => {
+                        event.preventDefault(); event.stopPropagation();
+                        try { await toggleNativeLock('pokemon', entry); render(); }
+                        catch (error) { showWindowMessage(backdrop.querySelector('.sell-confirm-modal'), error.message, true); }
+                    });
+                    row.appendChild(lock);
+                } else {
+                    const reason = getItemProtectionReason(entry);
+                    const lock = document.createElement('span');
+                    lock.textContent = reason ? '🔒' : '🔓';
+                    lock.title = reason ? `Bloqueado por: ${reason}. Clique para desbloquear.` : 'Clique para bloquear pelo cadeado nativo do Mark';
+                    lock.setAttribute('role', 'button'); lock.tabIndex = 0;
+                    lock.style.cssText = 'padding:5px;font-size:16px;cursor:pointer;';
+                    lock.addEventListener('click', async event => {
+                        event.preventDefault(); event.stopPropagation();
+                        try { await togglePortableItemProtection(entry); render(); }
+                        catch (error) { showWindowMessage(backdrop.querySelector('.sell-confirm-modal'), error.message, true); }
+                    });
+                    row.appendChild(lock);
+                }
+                row.appendChild(action);
                 row.addEventListener('click', async () => {
                     if (kind === 'item') {
+                        const protectionReason = getItemProtectionReason(entry);
+                        if (protectionReason) {
+                            showWindowMessage(backdrop.querySelector('.sell-confirm-modal'), `❌ Este item está TRAVADO (${protectionReason}). Destrave-o para depositá-lo.`, true);
+                            return;
+                        }
                         const available = Math.max(1, Math.floor(Number(entry.quantity) || 1));
-                        const answer = window.prompt(`Quantidade de ${entry.name || `Item #${entry.itemId}`}:`, String(available));
-                        if (answer === null) return;
-                        const quantity = Math.min(available, Math.floor(Number(answer)));
-                        if (!Number.isFinite(quantity) || quantity < 1) return;
+                        const quantity = await showScriptQuantityPrompt(`Quantidade de ${entry.name || `Item #${entry.itemId}`}:`, available);
+                        if (!quantity) return;
                         familyAction({ action: 'item', dir: direction, itemId: entry.itemId ?? entry.id, quantity });
                     } else {
+                        if (isNativeLocked(entry)) {
+                            showWindowMessage(backdrop.querySelector('.sell-confirm-modal'), 'Desbloqueie este Pokémon antes de transferi-lo.', true);
+                            return;
+                        }
                         const confirmed = await showScriptConfirm(
                             `${direction === 'deposit' ? 'Depositar' : 'Retirar'} ${entry.name || 'este Pokémon'} no depósito da família?`,
                             { title: 'Depósito da família' }
@@ -3157,11 +3531,12 @@
             const query = filters.name.trim().toLocaleLowerCase();
             const iv = Number(entry.ivTotal || 0);
             const quality = Number(entry.quality || 0);
+            const decimal = value => Number(String(value).replace(',', '.'));
             if (query && !name.includes(query)) return false;
             if (filters.ivMin !== '' && iv < Number(filters.ivMin)) return false;
             if (filters.ivMax !== '' && iv > Number(filters.ivMax)) return false;
-            if (filters.qualityMin !== '' && quality < Number(filters.qualityMin)) return false;
-            if (filters.qualityMax !== '' && quality > Number(filters.qualityMax)) return false;
+            if (filters.qualityMin !== '' && quality < decimal(filters.qualityMin)) return false;
+            if (filters.qualityMax !== '' && quality > decimal(filters.qualityMax)) return false;
             return true;
         });
 
@@ -3169,11 +3544,11 @@
             const controls = document.createElement('div');
             controls.className = 'portable-depot-poke-filters';
             controls.innerHTML = `
-                <input type="search" data-filter="name" placeholder="Buscar Pokémon pelo nome">
+                <input type="text" data-filter="name" placeholder="Buscar Pokémon pelo nome">
                 <input type="number" data-filter="ivMin" min="0" max="192" placeholder="IV mín.">
                 <input type="number" data-filter="ivMax" min="0" max="192" placeholder="IV máx.">
-                <input type="number" data-filter="qualityMin" min="0" step="0.01" placeholder="Qual. mín.">
-                <input type="number" data-filter="qualityMax" min="0" step="0.01" placeholder="Qual. máx.">
+                <input type="text" inputmode="decimal" data-filter="qualityMin" placeholder="Qual. mín. (0,00)">
+                <input type="text" inputmode="decimal" data-filter="qualityMax" placeholder="Qual. máx. (0,00)">
                 <button type="button" class="portable-depot-clear-filters">Limpar</button>`;
             controls.querySelectorAll('[data-filter]').forEach(input => {
                 input.value = filters[input.dataset.filter];
@@ -3232,7 +3607,33 @@
                 const action = document.createElement('span');
                 action.style.cssText = 'color:#64c8ff;font-size:12px;font-weight:800;';
                 action.textContent = direction === 'store' ? 'Guardar →' : '← Retirar';
-                row.append(image, label, action);
+                row.append(image, label);
+                if (isPokemon) {
+                    const lock = document.createElement('span');
+                    lock.textContent = isNativeLocked(entry) ? '🔒' : '🔓';
+                    lock.title = 'Proteger/desproteger Pokémon';
+                    lock.style.cssText = 'padding:5px;font-size:16px;';
+                    lock.addEventListener('click', async event => {
+                        event.preventDefault(); event.stopPropagation();
+                        try { await toggleNativeLock('pokemon', entry); render(); }
+                        catch (error) { showWindowMessage(backdrop.querySelector('.sell-confirm-modal'), error.message, true); }
+                    });
+                    row.appendChild(lock);
+                } else {
+                    const reason = getItemProtectionReason(entry);
+                    const lock = document.createElement('span');
+                    lock.textContent = reason ? '🔒' : '🔓';
+                    lock.title = reason ? `Bloqueado por: ${reason}. Clique para desbloquear.` : 'Clique para bloquear pelo cadeado nativo do Mark';
+                    lock.setAttribute('role', 'button'); lock.tabIndex = 0;
+                    lock.style.cssText = 'padding:5px;font-size:16px;cursor:pointer;';
+                    lock.addEventListener('click', async event => {
+                        event.preventDefault(); event.stopPropagation();
+                        try { await togglePortableItemProtection(entry); render(); }
+                        catch (error) { showWindowMessage(backdrop.querySelector('.sell-confirm-modal'), error.message, true); }
+                    });
+                    row.appendChild(lock);
+                }
+                row.appendChild(action);
                 row.addEventListener('click', async () => {
                     if (busy) return;
                     busy = true;
@@ -3244,6 +3645,8 @@
                             await new Promise(resolve => setTimeout(resolve, 350));
                             pokes = await requestGameEvent('pokes', 'pokes-get', latestPokemon);
                         } else {
+                            const protectionReason = getItemProtectionReason(entry);
+                            if (protectionReason) throw new Error(`❌ Este item está TRAVADO (${protectionReason}). Destrave-o para depositá-lo.`);
                             depotData = await gameApiRequest('/api/game/depot/move', {
                                 method: 'POST',
                                 body: JSON.stringify({ itemId: entry.id, dir: direction })
@@ -3262,6 +3665,8 @@
         };
 
         const render = () => {
+            const previousContentScroll = content.scrollTop;
+            const previousColumnScrolls = Array.from(content.querySelectorAll('section')).map(section => section.scrollTop);
             content.innerHTML = '';
             content.style.cssText = 'display:flex;gap:12px;flex-wrap:wrap;';
             if (activeTab === 'items') {
@@ -3300,6 +3705,12 @@
                     makeFamilyColumn('Depósito da família', stored, 'withdraw', 'pokemon')
                 );
             }
+            requestAnimationFrame(() => {
+                content.scrollTop = previousContentScroll;
+                content.querySelectorAll('section').forEach((section, index) => {
+                    section.scrollTop = previousColumnScrolls[index] || 0;
+                });
+            });
         };
 
         const bindTab = tab => {
@@ -3420,7 +3831,8 @@
                                 name: catalogItem?.name || `Item ${entry.itemId}`,
                                 qty: Number(entry.quantity) || 0,
                                 category: String(catalogItem?.category || '').toLowerCase(),
-                                npcPrice: Number(catalogItem?.npcPrice) || 0
+                                npcPrice: Number(catalogItem?.npcPrice) || 0,
+                                locked: isNativeLocked(entry)
                             };
                         }).filter(item => item.qty > 0 && item.npcPrice > 0)
                             .filter(item => !['heal', 'revive', 'stone'].includes(item.category));
@@ -3433,20 +3845,14 @@
                 return;
             }
 
-            const protectedNames = new Set([
-                ...getSellLocks(),
-                'Strange Pheromone',
-                'Bronze Boss Token',
-                'Rare Pokemon Picture',
-                'Rare Pokémon Picture'
-            ].map(name => name.toLowerCase()));
-
             status.style.display = 'none';
             footer.style.display = 'flex';
             inventory.sort((a, b) => a.name.localeCompare(b.name)).forEach(item => {
-                const isProtected = protectedNames.has(item.name.toLowerCase());
+                const protectionReason = getItemProtectionReason(item);
+                const isProtected = Boolean(protectionReason);
                 const row = document.createElement('label');
                 row.className = `hunt-sell-row${isProtected ? ' protected' : ''}`;
+                row.style.gridTemplateColumns = 'auto 1fr 90px auto';
 
                 const checkbox = document.createElement('input');
                 checkbox.type = 'checkbox';
@@ -3456,7 +3862,7 @@
                 checkbox.dataset.unitPrice = String(item.npcPrice);
 
                 const name = document.createElement('span');
-                name.textContent = `${item.name} (${item.qty.toLocaleString('pt-BR')}) · 💲${item.npcPrice.toLocaleString('pt-BR')}${isProtected ? ' 🔒' : ''}`;
+                name.textContent = `${item.name} (${item.qty.toLocaleString('pt-BR')}) · 💲${item.npcPrice.toLocaleString('pt-BR')}`;
 
                 const quantity = document.createElement('input');
                 quantity.type = 'number';
@@ -3465,7 +3871,23 @@
                 quantity.value = String(item.qty);
                 quantity.disabled = isProtected;
 
-                row.append(checkbox, name, quantity);
+                const lock = document.createElement('span');
+                lock.textContent = isProtected ? '🔒' : '🔓';
+                lock.title = protectionReason ? `Bloqueado por: ${protectionReason}. Clique para desbloquear.` : 'Clique para bloquear pelo cadeado nativo do Mark';
+                lock.setAttribute('role', 'button'); lock.tabIndex = 0;
+                lock.style.cssText = 'cursor:pointer;font-size:16px;padding:4px;';
+                lock.addEventListener('click', async event => {
+                    event.preventDefault(); event.stopPropagation();
+                    try {
+                        const locked = await togglePortableItemProtection(item);
+                        lock.textContent = locked ? '🔒' : '🔓';
+                        checkbox.disabled = locked;
+                        quantity.disabled = locked;
+                        if (locked) checkbox.checked = false;
+                        updateSaleSummary();
+                    } catch (error) { showWindowMessage(backdrop.querySelector('.sell-confirm-modal'), error.message, true); }
+                });
+                row.append(checkbox, name, quantity, lock);
                 list.appendChild(row);
             });
 
@@ -3641,10 +4063,10 @@
 
             footer.style.display = 'flex';
             sellable.forEach(poke => {
-                const protectedPoke = Boolean(poke.locked || poke.shiny || poke.market || poke.listed);
+                const protectedPoke = Boolean(isNativeLocked(poke) || poke.shiny || poke.market || poke.listed);
                 const row = document.createElement('label');
                 row.className = `hunt-sell-row${protectedPoke ? ' protected' : ''}`;
-                row.style.gridTemplateColumns = 'auto 1fr auto';
+                row.style.gridTemplateColumns = 'auto 1fr auto auto';
                 row.dataset.searchName = String(poke.name || '').toLocaleLowerCase();
                 row.dataset.shiny = poke.shiny ? 'true' : 'false';
                 row.dataset.iv = String(Number(poke.ivTotal) || 0);
@@ -3659,7 +4081,7 @@
                 const name = document.createElement('span');
                 const flags = [
                     poke.shiny ? '✨' : '',
-                    poke.locked ? '🔒' : '',
+                    isNativeLocked(poke) ? '🔒' : '',
                     (poke.market || poke.listed) ? '🏷️' : ''
                 ].filter(Boolean).join(' ');
                 const quality = formatPokemonQualityWithPotential(poke.quality, poke.ivTotal, poke.shiny);
@@ -3667,7 +4089,22 @@
 
                 const value = document.createElement('strong');
                 value.textContent = `💲${Number(poke.sellValue).toLocaleString('pt-BR')}`;
-                row.append(checkbox, name, value);
+                const lock = document.createElement('button');
+                lock.type = 'button';
+                lock.className = 'mk-lock';
+                lock.textContent = isNativeLocked(poke) ? '🔒' : '🔓';
+                lock.title = 'Usar o cadeado nativo deste Pokémon';
+                lock.addEventListener('click', async event => {
+                    event.preventDefault(); event.stopPropagation();
+                    try {
+                        const locked = await toggleNativeLock('pokemon', poke);
+                        lock.textContent = locked ? '🔒' : '🔓';
+                        checkbox.disabled = locked || poke.shiny || poke.market || poke.listed;
+                        if (locked) checkbox.checked = false;
+                        updateSummary();
+                    } catch (error) { showWindowMessage(backdrop.querySelector('.sell-confirm-modal'), error.message, true); }
+                });
+                row.append(checkbox, name, value, lock);
                 list.appendChild(row);
             });
 
@@ -4000,20 +4437,30 @@
                     <span style="color:#a0aec0;">${tr('quantity')}: <b style="color:#e2e8f0;">${quantity.toLocaleString(getGameLanguage() === 'pt' ? 'pt-BR' : 'en-US')}</b></span>
                     <b style="color:#f6c453;">${offerOnly ? tr('offerOnly') : `${currencyIcon} ${price.toLocaleString(getGameLanguage() === 'pt' ? 'pt-BR' : 'en-US')}`}</b>`;
                 const buyButton = document.createElement('button');
+                const quantityInput = document.createElement('input');
+                quantityInput.type = 'number';
+                quantityInput.min = '1';
+                quantityInput.max = String(Math.max(1, quantity));
+                quantityInput.value = '1';
+                quantityInput.title = 'Quantidade a comprar';
+                quantityInput.style.cssText = 'width:72px;background:#0c161f;color:#e2e8f0;border:1px solid #273f52;border-radius:5px;padding:6px;';
+                quantityInput.hidden = entry.kind === 'pokemon' || quantity <= 1;
                 buyButton.type = 'button';
                 buyButton.className = 'mk-bulk-btn market-buy';
                 buyButton.textContent = tr('buy');
+                buyButton.style.cssText = 'width:auto;min-width:76px;min-height:32px;padding:6px 12px;grid-column:auto;';
                 buyButton.disabled = offerOnly;
                 buyButton.addEventListener('click', async () => {
                     buyButton.disabled = true;
                     try {
+                        const buyQuantity = entry.kind === 'pokemon' ? 1 : Math.max(1, Math.min(quantity, parseInt(quantityInput.value, 10) || 1));
                         const characterData = await gameApiRequest('/api/characters/me');
                         const currentBalance = currency === 'DIAMONDS'
                             ? Number(characterData.character?.diamonds || 0)
                             : Number(characterData.character?.gold || 0);
                         const confirmed = await new Promise(resolve => showPurchaseConfirm({
                             name,
-                            quantity: 1,
+                            quantity: buyQuantity,
                             unitPrice: price,
                             currentBalance,
                             currency
@@ -4030,17 +4477,17 @@
                                 refId: entry.refId,
                                 price: entry.price,
                                 currency: entry.currency,
-                                quantity: 1,
-                                ids: entry.ids ?? [entry.id]
+                                quantity: buyQuantity,
+                                ids: (entry.ids ?? [entry.id]).slice(0, buyQuantity)
                             };
                         await gameApiRequest('/api/game/market/action', {
                             method: 'POST',
                             body: JSON.stringify(marketAction)
                         });
-                        if (quantity <= 1 || entry.kind === 'pokemon') {
+                        if (quantity <= buyQuantity || entry.kind === 'pokemon') {
                             currentListings = currentListings.filter(item => item !== entry);
                         } else {
-                            entry.quantity = quantity - 1;
+                            entry.quantity = quantity - buyQuantity;
                         }
                         render();
                         showWindowMessage(backdrop.querySelector('.script-market-window'), tr('purchaseDone'));
@@ -4049,7 +4496,10 @@
                         buyButton.disabled = false;
                     }
                 });
-                row.appendChild(buyButton);
+                const buyActions = document.createElement('div');
+                buyActions.style.cssText = 'display:flex;align-items:center;justify-content:flex-end;gap:6px;white-space:nowrap;';
+                buyActions.append(quantityInput, buyButton);
+                row.appendChild(buyActions);
                 list.appendChild(row);
             });
             if (visible.length < filtered.length) {
@@ -4776,90 +5226,19 @@
         injectMarkQualityMultiSelect(mkWindow);
         injectMarkSettingsButton(mkWindow);
         
-        // 1. Sell Tab: Locks & Intercept Sell
+        // A proteção/lock de itens agora é nativa do jogo; não duplicar controles no Mark.
         const isSellTab = !!Array.from(mkWindow.querySelectorAll('.mk-tab'))
             .find(t => t.classList.contains('on') && /\b(?:Sell|Vender)\b/i.test(t.textContent));
         if (isSellTab) {
-            const locks = getSellLocks();
-            const guardActive = isGuardSellLockActive();
             mkWindow.querySelectorAll('.mk-srow-head').forEach(row => {
-                if (row.querySelector('.mk-lock')) return;
-                const priceSpan = row.querySelector('.mk-price');
-                const nameEl = row.querySelector('.mk-name');
-                const itemName = nameEl ? nameEl.textContent.trim() : '';
-                if (priceSpan) {
-                    const lockBtn = document.createElement('button');
-                    lockBtn.type = 'button';
-                    const initLocked = locks.includes(itemName);
-                    lockBtn.className = `mk-lock${initLocked ? ' on' : ''}`;
-                    lockBtn.title = initLocked ? 'Unlock — release for selling' : 'Lock — protect from selling';
-                    lockBtn.setAttribute('aria-label', initLocked ? 'Unlock Item' : 'Lock Item');
-                    lockBtn.innerHTML = initLocked ? '🔒' : '🔓';
-                    
-                    if (initLocked) {
-                        row.classList.add('locked');
-                        const cb = row.querySelector('input.mk-check');
-                        if (cb) {
-                            if (cb.checked) cb.click();
-                            if (guardActive) cb.setAttribute('disabled', '');
-                        }
-                    }
-
-                    lockBtn.addEventListener('click', (e) => {
-                        e.stopPropagation();
-                        e.preventDefault();
-                        const isLocked = row.classList.toggle('locked');
-                        lockBtn.className = `mk-lock${isLocked ? ' on' : ''}`;
-                        lockBtn.title = isLocked ? 'Unlock — release for selling' : 'Lock — protect from selling';
-                        lockBtn.setAttribute('aria-label', isLocked ? 'Unlock Item' : 'Lock Item');
-                        lockBtn.innerHTML = isLocked ? '🔒' : '🔓';
-                        
-                        if (isLocked) addSellLock(itemName); else removeSellLock(itemName);
-                        
-                        const cb = row.querySelector('input.mk-check');
-                        if (cb) {
-                            if (isLocked) {
-                                if (cb.checked) cb.click();
-                                if (guardActive) cb.setAttribute('disabled', '');
-                            } else {
-                                cb.removeAttribute('disabled');
-                            }
-                        }
-                    });
-                    
-                    row.appendChild(lockBtn);
-                }
+                const itemName = row.querySelector('.mk-name')?.textContent?.trim();
+                const nativeLock = row.querySelector('.mk-lock, [class*="lock" i][role="button"], button[aria-label*="lock" i]');
+                if (!itemName || !nativeLock) return;
+                const lockText = `${nativeLock.textContent || ''} ${nativeLock.title || ''} ${nativeLock.getAttribute('aria-label') || ''}`;
+                const locked = row.classList.contains('locked') || nativeLock.classList.contains('on')
+                    || /🔒|unlock|destravar|desbloquear/i.test(lockText);
+                setNativeItemLock(itemName, locked);
             });
-            
-            // Hijack Select All to respect our custom locks
-            const sellSelectAll = mkWindow.querySelector('button.mk-selall');
-            if (sellSelectAll && !sellSelectAll.dataset.sellLockIntercepted) {
-                sellSelectAll.addEventListener('click', (e) => {
-                    if (!isGuardSellLockActive()) return;
-                    e.stopImmediatePropagation();
-                    e.stopPropagation();
-
-                    const allRows = Array.from(mkWindow.querySelectorAll('.mk-srow-head'));
-                    const unlockedRows = allRows.filter(r => !r.classList.contains('locked'));
-                    
-                    const anyUnchecked = unlockedRows.some(r => {
-                        const cb = r.querySelector('input.mk-check');
-                        return cb && !cb.checked;
-                    });
-
-                    unlockedRows.forEach(r => {
-                        const cb = r.querySelector('input.mk-check');
-                        if (cb) {
-                            if (anyUnchecked && !cb.checked) cb.click();
-                            else if (!anyUnchecked && cb.checked) cb.click();
-                        }
-                    });
-                    
-                    sellSelectAll.textContent = anyUnchecked ? '☑ Deselect all' : '☐ Select all';
-                }, true); // Important: capture phase!
-                sellSelectAll.dataset.sellLockIntercepted = 'true';
-            }
-            
             // Intercept Sell CTA via event delegation on the sellbar
             const sellBar = mkWindow.querySelector('.mk-sellbar');
             if (sellBar && !sellBar.dataset.sellIntercepted) {
@@ -4985,22 +5364,16 @@
 
         const bar = document.createElement('div');
         bar.className = 'dex-script-controls';
-        bar.innerHTML = `
-            <button class="dex-fbtn" data-filter="all" type="button">Todos</button>
-            <button class="dex-fbtn" data-filter="caught" type="button">✓ Caught</button>
-            <button class="dex-fbtn" data-filter="notcaught" type="button">✗ Not Caught</button>
-            <button class="dex-fbtn" data-filter="claimable" type="button">🎁 To Claim</button>
-            <button class="dex-fbtn" data-filter="sort-value" type="button" style="display:none;">💰 Menor Valor</button>
-            ${ftEnabled ? '<label class="dex-ft-label"><input type="checkbox" class="dex-ft-check"> ⚡ Fast Travel</label>' : ''}
-        `;
+        // Filtros e ordenação já são fornecidos pela Pokédex nativa.
+        bar.innerHTML = ftEnabled ? '<label class="dex-ft-label"><input type="checkbox" class="dex-ft-check"> ⚡ Fast Travel</label>' : '';
         dexControls.after(bar);
 
         const filterBtns = bar.querySelectorAll('.dex-fbtn[data-filter]');
         const sortBtn = bar.querySelector('.dex-fbtn[data-filter="sort-value"]');
 
         // Restore persisted state
-        let currentFilter = getDexFilter();
-        let sortedByValue = isDexSortedByValue();
+        let currentFilter = 'all';
+        let sortedByValue = false;
         let originalOrder = null;
 
         function applyFilter() {
@@ -5064,7 +5437,7 @@
         filterBtns.forEach(b => b.classList.remove('on'));
         const activeBtn = bar.querySelector(`.dex-fbtn[data-filter="${currentFilter}"]`);
         if (activeBtn) activeBtn.classList.add('on');
-        if (currentFilter === 'notcaught') sortBtn.style.display = '';
+        if (currentFilter === 'notcaught' && sortBtn) sortBtn.style.display = '';
         applyFilter();
 
         filterBtns.forEach(btn => {
@@ -5434,6 +5807,10 @@
         const defeated = getCardVal(0);
         const timeText = haWindow.querySelectorAll('.ha-card b')[1]?.textContent || '0s';
         const xpGained = getCardVal(2);
+        if (lastAnalyzerXp === null || xpGained !== lastAnalyzerXp) {
+            lastAnalyzerXp = xpGained;
+            lastAnalyzerXpChangeAt = Date.now();
+        }
         
         const balanceNode = haWindow.querySelector('.ha-balance b');
         let balance = 0;
