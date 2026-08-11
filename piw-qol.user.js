@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Poke Idle World - Quality of Life (PIW-QOL)
 // @namespace    http://tampermonkey.net/
-// @version      10.0.0
+// @version      10.0.1
 // @description  Suporte a ícones oficiais via items.json, lógica de valores robusta e tooltips esteticamente alinhadas ao jogo.
 // @author       Desjunior (JulianoCLI)
 // @match        https://poke.idleworld.online/play
@@ -116,6 +116,11 @@
         return gameSocket?.readyState === NativeWebSocket.OPEN;
     }
 
+    function logAutoReconnectStatus(message, isError = false) {
+        const logger = isError ? console.warn : console.info;
+        logger(`[PIW-QOL] Auto-reconnect: ${message}`);
+    }
+
     setInterval(async () => {
         const captureBar = document.querySelector('[data-guide="capture-bar"]');
         const inHunt = isInHuntContext();
@@ -140,16 +145,16 @@
         try {
             const previousHunt = getCurrentHuntNameForReconnect();
             if (!previousHunt) throw new Error('A hunt atual não pôde ser identificada.');
-            showScriptNotice(`Hunt sem resposta. Indo a Cerulean por 10 segundos antes de voltar para ${previousHunt}…`, { title: 'Auto-reconnect' });
+            logAutoReconnectStatus(`Hunt sem resposta. Indo a Cerulean por 10 segundos antes de voltar para ${previousHunt}…`);
             const reachedCerulean = await teleportToCeruleanForReconnect();
             if (!reachedCerulean) throw new Error('Cerulean não foi localizada no mapa.');
             await new Promise(resolve => setTimeout(resolve, 10000));
             await teleportToTarget(previousHunt);
             lastHuntSocketActivityAt = Date.now();
-            showScriptNotice(`Retornando para ${previousHunt}.`, { title: 'Auto-reconnect' });
+            logAutoReconnectStatus(`Retornando para ${previousHunt}.`);
         } catch (error) {
             console.warn('Falha no auto-reconnect da hunt:', error);
-            showScriptNotice(`Não foi possível concluir o auto-reconnect: ${error.message}`, { title: 'Auto-reconnect', isError: true });
+            logAutoReconnectStatus(`Não foi possível concluir o auto-reconnect: ${error.message}`, true);
             setTimeout(() => location.reload(), 1500);
         } finally {
             autoReconnectInProgress = false;

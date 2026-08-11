@@ -2,7 +2,7 @@
 
 Um script gratuito que adiciona atalhos, informações e melhorias visuais ao [Pokémon Idle World](https://poke.idleworld.online/play).
 
-[![Versão](https://img.shields.io/badge/versão-10.0.0-blue?style=for-the-badge)](https://github.com/JulianoCLI/PIW-QOL/raw/main/piw-qol.user.js)
+[![Versão](https://img.shields.io/badge/versão-10.0.1-blue?style=for-the-badge)](https://github.com/JulianoCLI/PIW-QOL/raw/main/piw-qol.user.js)
 [![Instalar](https://img.shields.io/badge/instalar-script-brightgreen?style=for-the-badge)](https://github.com/JulianoCLI/PIW-QOL/raw/main/piw-qol.user.js)
 [![Licença](https://img.shields.io/badge/licença-MIT-green?style=for-the-badge)](LICENSE)
 
@@ -19,7 +19,7 @@ O script melhora a tela do jogo e reúne funções que normalmente exigiriam vá
 - melhorar a Pokédex e o Hunt Analyzer;
 - escolher quais modificações deseja usar.
 
-A versão 10.0.0 reorganiza o mapa com cidades, última hunt e favoritas em destaque, corrige nomes e efetividades e adiciona compras em quantidade no Mercado Global. Também preserva a rolagem do Depot e usa o endpoint nativo para cadeados de itens.
+A versão 10.0.1 reorganiza o mapa com cidades, última hunt e favoritas em destaque, corrige nomes e efetividades e adiciona compras em quantidade no Mercado Global. Também preserva a rolagem do Depot e usa o endpoint nativo para cadeados de itens.
 
 Você não precisa saber programar. Depois de instalado, o script funciona dentro do próprio jogo.
 
@@ -396,7 +396,7 @@ Para atualizar manualmente:
 
 Você também pode abrir novamente o [link de instalação](https://github.com/JulianoCLI/PIW-QOL/raw/main/piw-qol.user.js). Se já estiver instalado, a extensão oferecerá a atualização.
 
-Confira a versão no começo do script. A versão documentada neste README é a **10.0.0**.
+Confira a versão no começo do script. A versão documentada neste README é a **10.0.1**.
 
 ## Solução de problemas
 
