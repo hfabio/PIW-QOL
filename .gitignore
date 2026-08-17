@@ -1,1 +1,12 @@
+# Perfil do Chrome usado para depuracao local
 .chrome-debug-profile/
+
+# Pacotes gerados por build-extension.ps1
+dist/
+
+# Build da WebExtension e material de submissao: ficam apenas na maquina local
+build-extension.ps1
+extension/
+
+# Documento de planejamento pessoal
+PLANEJAMENTO_IMPLEMENTACOES.md

@@ -2,7 +2,7 @@
 
 Um script gratuito que adiciona atalhos, informações e melhorias visuais ao [Pokémon Idle World](https://poke.idleworld.online/play).
 
-[![Versão](https://img.shields.io/badge/versão-10.0.1-blue?style=for-the-badge)](https://github.com/JulianoCLI/PIW-QOL/raw/main/piw-qol.user.js)
+[![Versão](https://img.shields.io/badge/versão-10.1.0-blue?style=for-the-badge)](https://github.com/JulianoCLI/PIW-QOL/raw/main/piw-qol.user.js)
 [![Instalar](https://img.shields.io/badge/instalar-script-brightgreen?style=for-the-badge)](https://github.com/JulianoCLI/PIW-QOL/raw/main/piw-qol.user.js)
 [![Licença](https://img.shields.io/badge/licença-MIT-green?style=for-the-badge)](LICENSE)
 
@@ -19,7 +19,7 @@ O script melhora a tela do jogo e reúne funções que normalmente exigiriam vá
 - melhorar a Pokédex e o Hunt Analyzer;
 - escolher quais modificações deseja usar.
 
-A versão 10.0.1 reorganiza o mapa com cidades, última hunt e favoritas em destaque, corrige nomes e efetividades e adiciona compras em quantidade no Mercado Global. Também preserva a rolagem do Depot e usa o endpoint nativo para cadeados de itens.
+A versão 10.1.0 conserta o auto-reconnect, que às vezes deixava o personagem parado fora da hunt, e reorganiza a janela **Script Mods** em categorias. A porcentagem de potencial passou a vir desativada por padrão, e a opção "Proteção por cadeado" foi removida porque o próprio jogo já cuida disso.
 
 Você não precisa saber programar. Depois de instalado, o script funciona dentro do próprio jogo.
 
@@ -336,7 +336,28 @@ O Hunt Analyzer também pode mostrar:
 - tempo desde a captura;
 - quantidade de Poké Bolas usadas.
 
-O Log de Capturas, a Equipe, o Box/Depot e as listas de venda mostram a qualidade no formato **categoria · potencial × multiplicador**. O potencial é uma estimativa própria do script (não um valor oficial do jogo): 75% do peso vem da qualidade e 25% do IV total, cada um normalizado entre seus extremos — IV entre 0 e 192, qualidade entre ×0.80 e o teto que aquele Pokémon realmente pode alcançar. Esse teto é ×1.8 para capturas selvagens comuns (a rolagem normal nunca passa disso) e ×4.0 para Pokémon shiny ou de breeding, os únicos que alcançam as categorias Mítica, Anciã e Divina. Uma qualidade acima de ×1.8 já entrega sozinha que o Pokémon não veio de captura normal, então o teto de ×4.0 é aplicado mesmo sem a flag de shiny. O peso maior para a qualidade segue a [pokepédia oficial de Power](https://poke.idleworld.online/pokepedia/systems/quality), que explica que a qualidade entra duas vezes na fórmula de poder do jogo (como expoente de cada stat e como multiplicador final), pesando mais que o IV. As categorias Fraca, Comum, Incomum, Rara, Épica, Lendária, Mítica, Anciã e Divina usam cores próprias. A mesma porcentagem também aparece ao lado da qualidade nos anúncios de Pokémon do Mercado Global — tanto na janela nativa do jogo quanto na versão portátil do script — sempre na cor exata que o jogo já usa para aquele tier. A exibição da porcentagem pode ser desligada em **Configurações → Script Mods → Porcentagem de potencial**.
+O Log de Capturas, a Equipe, o Box/Depot e as listas de venda mostram a qualidade no formato **categoria · potencial × multiplicador**. O potencial é uma estimativa própria do script (não um valor oficial do jogo): 75% do peso vem da qualidade e 25% do IV total, cada um normalizado entre seus extremos — IV entre 0 e 192, qualidade entre ×0.80 e o teto que aquele Pokémon realmente pode alcançar. Esse teto é ×1.8 para capturas selvagens comuns (a rolagem normal nunca passa disso) e ×4.0 para Pokémon shiny ou de breeding, os únicos que alcançam as categorias Mítica, Anciã e Divina. Uma qualidade acima de ×1.8 já entrega sozinha que o Pokémon não veio de captura normal, então o teto de ×4.0 é aplicado mesmo sem a flag de shiny. O peso maior para a qualidade segue a [pokepédia oficial de Power](https://poke.idleworld.online/pokepedia/systems/quality), que explica que a qualidade entra duas vezes na fórmula de poder do jogo (como expoente de cada stat e como multiplicador final), pesando mais que o IV. As categorias Fraca, Comum, Incomum, Rara, Épica, Lendária, Mítica, Anciã e Divina usam cores próprias. A mesma porcentagem também aparece ao lado da qualidade nos anúncios de Pokémon do Mercado Global — tanto na janela nativa do jogo quanto na versão portátil do script — sempre na cor exata que o jogo já usa para aquele tier. Por ser uma estimativa do script, e não um dado oficial do jogo, a porcentagem vem **desativada por padrão**. Ligue-a em **Configurações → Script Mods → Pokémon → Porcentagem de potencial**.
+
+## Auto-reconnect da hunt
+
+Às vezes a hunt para de responder: a conexão cai, o personagem continua na tela, mas nada mais acontece. O **Auto-reconnect da hunt** percebe essa situação e recupera a sessão sozinho.
+
+Ele vem **desativado**. Ligue em **Configurações → Script Mods → Hunts → Auto-reconnect da hunt**.
+
+Como funciona:
+
+1. o script observa a atividade da hunt e, após 30 segundos sem nenhum sinal, considera que ela travou;
+2. teleporta para outra hunt de nível baixo que seu personagem já possa acessar;
+3. espera 10 segundos ali;
+4. volta para a hunt original e confirma a chegada.
+
+A parada intermediária é uma **hunt**, e não uma cidade, de propósito: assim o recurso continua ativo durante a manobra e consegue tentar de novo caso o retorno falhe. Se nenhuma hunt de nível baixo estiver disponível, ele usa Cerulean.
+
+Se o retorno não se confirmar, o script insiste por conta própria — o destino fica guardado no navegador e sobrevive até a um recarregamento da página. Depois de algumas tentativas sem sucesso, ele desiste e avisa no console para você voltar manualmente pelo mapa.
+
+O andamento é registrado no console do navegador com o prefixo `[PIW-QOL] Auto-reconnect:`, útil para entender o que aconteceu enquanto você estava longe.
+
+> O recurso não joga por você: ele apenas refaz o trajeto até a hunt em que você já estava.
 
 ## Pokédex
 
@@ -354,25 +375,33 @@ Quando o **Fast Travel da Pokédex** está ligado, clicar em um Pokémon procura
 
 ## Configurações do script
 
-Abra a engrenagem do jogo e selecione a aba **Script Mods**. As opções estão separadas em grupos para facilitar o uso.
+Abra a engrenagem do jogo e selecione a aba **Script Mods**. As opções ficam separadas em sete categorias, das mais usadas para as mais cosméticas.
 
-| Opção | O que faz |
-|---|---|
-| Mapa simplificado | Alterna entre a lista do script e o mapa normal |
-| Visualização de drops | Escolhe Ícone, Hover ou Oculto |
-| Ação do teleporte | Escolhe Favorita, Última hunt ou Desativado |
-| Exibir chat | Mostra ou esconde o chat |
-| Fast Travel da Pokédex | Permite teleportar clicando na Pokédex |
-| Mercado Global nas hunts | Liga ou desliga o mercado portátil |
-| Compras em grande quantidade | Liga ou desliga os botões adicionais |
-| Venda nas hunts | Liga ou desliga a loja portátil de venda |
-| Melhorias da loja do Mark | Liga ou desliga as melhorias em Cerulean |
-| Confirmação de venda | Escolhe quais itens exigem confirmação |
-| Proteção por cadeado | Evita selecionar itens bloqueados |
-| Proteção de raridade | Evita selecionar Pokémon raros em massa |
-| Porcentagem de potencial | Liga ou desliga o % estimado (75% qualidade + 25% IV) ao lado da qualidade |
+| Categoria | Opção | O que faz |
+|---|---|---|
+| 🗺️ Mapa e navegação | Mapa simplificado | Alterna entre a lista do script e o mapa normal |
+| 🗺️ Mapa e navegação | Visualização de drops | Escolhe Ícone, Hover ou Oculto |
+| 🗺️ Mapa e navegação | Ação do teleporte | Escolhe Favorita, Última hunt ou Desativado |
+| 🗺️ Mapa e navegação | Pokédex Fast Travel | Permite teleportar clicando na Pokédex |
+| ⚔️ Hunts | Auto-reconnect da hunt | Recupera a hunt quando ela para de responder |
+| ⚔️ Hunts | Comparação de hunts | Exibe a janela de comparação do Hunt Analyzer |
+| ⚔️ Hunts | Mercado Global nas hunts | Liga ou desliga o mercado portátil |
+| ⚔️ Hunts | Compras em grande quantidade | Liga ou desliga os botões adicionais |
+| ⚔️ Hunts | Venda nas hunts | Liga ou desliga a loja portátil de venda |
+| 🏪 Loja do Mark | Compras rápidas no Mark | Mostra 1, 10, 100, 1.000 e 10.000 em cada produto |
+| 🏪 Loja do Mark | Seletor de qualidades do Mark | Agrupa as qualidades em um seletor múltiplo |
+| 🏪 Loja do Mark | Melhorias da loja do Mark | Liga ou desliga as melhorias em Cerulean |
+| 🐾 Pokémon | Porcentagem de potencial | Liga o % estimado (75% qualidade + 25% IV) — **desativado por padrão** |
+| 🛡️ Proteções e vendas | Proteção de raridade | Evita selecionar Pokémon raros em massa |
+| 🛡️ Proteções e vendas | Confirmação de venda | Escolhe quais itens exigem confirmação |
+| 🪟 Interface | Scrollbars minimalistas | Substitui as barras brancas pelo estilo transparente |
+| 🪟 Interface | Exibir chat | Mostra ou esconde o chat |
+| 🔤 Fontes | Fonte do jogo | Escolhe a família tipográfica, inclusive um arquivo próprio |
+| 🔤 Fontes | Fonte unificada | Aplica a fonte escolhida às janelas e controles do jogo |
 
-Por padrão, o chat fica oculto e a visualização de drops usa o ícone `?`. Todas as preferências ficam salvas somente no navegador utilizado.
+Por padrão, o chat fica oculto, a visualização de drops usa o ícone `?` e a porcentagem de potencial fica desligada. Todas as preferências ficam salvas somente no navegador utilizado.
+
+A opção "Proteção por cadeado" saiu na versão 10.1.0: o próprio jogo passou a oferecer cadeados nativos, e o script agora usa esse recurso em vez de manter uma lista paralela.
 
 ### Idiomas
 
@@ -396,7 +425,7 @@ Para atualizar manualmente:
 
 Você também pode abrir novamente o [link de instalação](https://github.com/JulianoCLI/PIW-QOL/raw/main/piw-qol.user.js). Se já estiver instalado, a extensão oferecerá a atualização.
 
-Confira a versão no começo do script. A versão documentada neste README é a **10.0.1**.
+Confira a versão no começo do script. A versão documentada neste README é a **10.1.0**.
 
 ## Solução de problemas
 

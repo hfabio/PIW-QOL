@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Poke Idle World - Quality of Life (PIW-QOL)
 // @namespace    http://tampermonkey.net/
-// @version      10.0.1
+// @version      10.1.0
 // @description  Suporte a ícones oficiais via items.json, lógica de valores robusta e tooltips esteticamente alinhadas ao jogo.
 // @author       Desjunior (JulianoCLI)
 // @match        https://poke.idleworld.online/play
@@ -132,6 +132,50 @@
         }
         if (!isAutoReconnectActive() || autoReconnectInProgress) return;
         const now = Date.now();
+        const pendingReturn = getPendingReconnectReturn();
+        // Durante o reconnect o personagem passa por uma hunt de escala; gravá-la como
+        // "última hunt" apagaria justamente o destino que precisamos restaurar. Fica
+        // depois da guarda de isAutoReconnectActive() para não alterar o alvo do botão
+        // ↻ de quem nunca ligou o recurso.
+        if (!pendingReturn) rememberCurrentHuntFromHud();
+
+        // Um retorno não confirmado deixa o personagem na hunt de escala, que gera XP
+        // e zeraria o timer de inatividade — escondendo a falha e prendendo o jogador
+        // na hunt errada. Por isso o retorno pendente é retomado sozinho, sem depender
+        // do timer de hunt parada, e persiste entre recarregamentos da página.
+        if (pendingReturn) {
+            const target = pendingReturn.hunt;
+            if (getCleanHuntName(getCurrentHuntLocation()) === getCleanHuntName(target)) {
+                clearPendingReconnectReturn();
+                return;
+            }
+            if (now - lastAutoReconnectAt < 60000) return;
+            lastAutoReconnectAt = now;
+            autoReconnectInProgress = true;
+            const attempts = pendingReturn.attempts + 1;
+            setPendingReconnectReturn(target, { attempts, reloaded: pendingReturn.reloaded });
+            try {
+                logAutoReconnectStatus(`Retomando o retorno pendente para ${target} (rodada ${attempts})…`);
+                if (await teleportForReconnect(target)) {
+                    clearPendingReconnectReturn();
+                    lastHuntSocketActivityAt = Date.now();
+                    logAutoReconnectStatus(`De volta em ${target}.`);
+                } else if (attempts >= 3 && !pendingReturn.reloaded) {
+                    // Uma única recarga por pendência: `reloaded` é gravado antes do
+                    // reload para que a retomada seguinte não recarregue outra vez.
+                    setPendingReconnectReturn(target, { attempts: 0, reloaded: true });
+                    logAutoReconnectStatus(`Sem sucesso ao voltar para ${target}; recarregando a página e tentando de novo.`, true);
+                    setTimeout(() => location.reload(), 1500);
+                } else if (attempts >= 3) {
+                    clearPendingReconnectReturn();
+                    logAutoReconnectStatus(`Desisti de voltar para ${target}. Volte manualmente pelo mapa.`, true);
+                }
+            } finally {
+                autoReconnectInProgress = false;
+            }
+            return;
+        }
+
         const connectionLost = !gameSocket || gameSocket.readyState !== NativeWebSocket.OPEN;
         const captureBarSignature = captureBar?.innerHTML || '';
         if (!connectionLost && captureBar && captureBarSignature !== lastCaptureBarSignature) {
@@ -145,17 +189,29 @@
         try {
             const previousHunt = getCurrentHuntNameForReconnect();
             if (!previousHunt) throw new Error('A hunt atual não pôde ser identificada.');
-            logAutoReconnectStatus(`Hunt sem resposta. Indo a Cerulean por 10 segundos antes de voltar para ${previousHunt}…`);
-            const reachedCerulean = await teleportToCeruleanForReconnect();
-            if (!reachedCerulean) throw new Error('Cerulean não foi localizada no mapa.');
+            const scratchStop = await teleportToScratchStopForReconnect(previousHunt);
+            if (!scratchStop) throw new Error('Nenhum destino intermediário foi localizado no mapa.');
+            // Registrado antes da espera: se o retorno falhar, o intervalo retoma daqui.
+            setPendingReconnectReturn(previousHunt);
+            logAutoReconnectStatus(`Hunt sem resposta. Em ${scratchStop} por 10 segundos antes de voltar para ${previousHunt}…`);
             await new Promise(resolve => setTimeout(resolve, 10000));
-            await teleportToTarget(previousHunt);
+            if (!await teleportForReconnect(previousHunt)) {
+                throw new Error(`O retorno para ${previousHunt} não foi confirmado.`);
+            }
+            clearPendingReconnectReturn();
             lastHuntSocketActivityAt = Date.now();
-            logAutoReconnectStatus(`Retornando para ${previousHunt}.`);
+            logAutoReconnectStatus(`De volta em ${previousHunt}.`);
         } catch (error) {
             console.warn('Falha no auto-reconnect da hunt:', error);
-            logAutoReconnectStatus(`Não foi possível concluir o auto-reconnect: ${error.message}`, true);
-            setTimeout(() => location.reload(), 1500);
+            // Se o personagem continua numa hunt, o próprio intervalo tenta de novo
+            // em 60 segundos; recarregar a página aqui seria mais destrutivo que o
+            // problema. O reload fica só para quando ele parou fora de uma hunt.
+            if (isInHuntContext()) {
+                logAutoReconnectStatus(`${error.message} Nova tentativa em 60 segundos.`, true);
+            } else {
+                logAutoReconnectStatus(`Não foi possível concluir o auto-reconnect: ${error.message}`, true);
+                setTimeout(() => location.reload(), 1500);
+            }
         } finally {
             autoReconnectInProgress = false;
         }
@@ -209,7 +265,6 @@
     const STORAGE_NATIVE_ITEM_LOCKS = 'script_native_item_locks_v1';
     const STORAGE_DEX_FAST_TRAVEL = 'script_dex_fast_travel_v1';
     const STORAGE_GUARD_LEGENDARY = 'script_guard_legendary_v1';
-    const STORAGE_GUARD_SELL_LOCK = 'script_guard_sell_lock_v1';
     const STORAGE_HA_COMPACT = 'script_ha_compact_v1';
     const STORAGE_HA_DROPS = 'script_ha_drops_v1';
     const STORAGE_DEX_FILTER = 'script_dex_filter_v1';
@@ -224,6 +279,7 @@
     const STORAGE_PRIMARY_FAVORITE = 'script_primary_favorite_v1';
     const STORAGE_GAME_FONT = 'script_game_font_v1';
     const STORAGE_AUTO_RECONNECT = 'script_auto_reconnect_v1';
+    const STORAGE_RECONNECT_PENDING = 'script_reconnect_pending_v1';
     const STORAGE_CUSTOM_SCROLLBARS = 'script_custom_scrollbars_v1';
     const STORAGE_UNIFIED_FONTS = 'script_unified_fonts_v1';
     const STORAGE_COMPARE_WINDOW = 'script_compare_window_v1';
@@ -289,7 +345,14 @@
         document.documentElement.style.setProperty('--piw-game-font', key === 'custom' && custom ? custom : GAME_FONT_OPTIONS[key === 'custom' ? 'barlow' : key]);
     }
     function isAutoReconnectActive() { return localStorage.getItem(STORAGE_AUTO_RECONNECT) === 'true'; }
-    const preferenceEnabled = key => localStorage.getItem(key) !== 'false';
+    // A maioria das preferências vem ligada e o usuário desliga o que não quer. As
+    // listadas aqui são o contrário: só valem se o usuário marcar. A porcentagem de
+    // potencial entra nesse grupo porque é uma estimativa do script, não um dado
+    // oficial do jogo, e não deve aparecer sem que a pessoa tenha pedido.
+    const OPT_IN_PREFERENCES = new Set([STORAGE_SHOW_QUALITY_POTENTIAL]);
+    const preferenceEnabled = key => OPT_IN_PREFERENCES.has(key)
+        ? localStorage.getItem(key) === 'true'
+        : localStorage.getItem(key) !== 'false';
     function applyVisualPreferences() {
         document.documentElement.classList.toggle('script-custom-scrollbars', preferenceEnabled(STORAGE_CUSTOM_SCROLLBARS));
         document.documentElement.classList.toggle('script-unified-fonts', preferenceEnabled(STORAGE_UNIFIED_FONTS));
@@ -345,7 +408,7 @@
             show: 'Exibir', hide: 'Ocultar', dexFastTravelDesc: 'Exibe o Fast Travel na Pokédex.',
             enableDexFastTravel: 'Habilitar ⚡ Fast Travel na Pokédex', selectAllGuards: 'Proteções do Selecionar tudo',
             selectAllGuardsDesc: 'Proteções aplicadas ao selecionar tudo nas abas.',
-            protectLegendary: 'Desmarcar Pokémon lendários (aba Pokémon)', protectLocked: 'Desmarcar itens com cadeado (aba Loja)',
+            protectLegendary: 'Desmarcar Pokémon lendários (aba Pokémon)',
             sellConfirmation: 'Itens com confirmação de venda',
             huntFeatures: 'Recursos da Hunt', huntFeaturesDesc: 'Escolha quais melhorias aparecem enquanto estiver em uma hunt.',
             marketHud: 'HUD do Mercado Global', marketHudDesc: 'Consulta anúncios sem precisar sair da hunt.',
@@ -379,7 +442,7 @@
             show: 'Show', hide: 'Hide', dexFastTravelDesc: 'Shows the Fast Travel option in the Pokédex.',
             enableDexFastTravel: 'Enable ⚡ Fast Travel in the Pokédex', selectAllGuards: 'Select All Guards',
             selectAllGuardsDesc: 'Protections applied when using Select All in tabs.',
-            protectLegendary: 'Deselect legendary Pokémon (Pokémon tab)', protectLocked: 'Deselect locked items (Shop tab)',
+            protectLegendary: 'Deselect legendary Pokémon (Pokémon tab)',
             sellConfirmation: 'Sell Confirmation Items',
             huntFeatures: 'Hunt Features', huntFeaturesDesc: 'Choose which enhancements are available while inside a hunt.',
             marketHud: 'Global Market HUD', marketHudDesc: 'Browse listings without leaving the hunt.',
@@ -1078,51 +1141,86 @@
         nav.game-dock::before, .phud.game-hud-tl::before, .phud.game-hud.t1::before {
             border-radius: 7px !important;
         }
+        /* Janela de Script Mods. Todo o visual das linhas vive aqui: o markup só
+           declara estrutura e classes, sem estilo inline, para não voltar a exigir
+           !important para vencer atributos style. */
         .cfg-window.script-mods-open {
-            width: min(900px, 94vw) !important;
-            max-width: 94vw !important;
+            width: min(920px, 94vw) !important; max-width: 94vw !important;
+            height: min(780px, 92vh) !important; max-height: 92vh !important;
         }
+        .cfg-window.script-mods-open .cfg-body { min-height: 0; overflow: hidden !important; }
+        .cfg-mods-content { width: 100%; height: 100%; min-width: 0; overflow: auto; box-sizing: border-box; }
+
+        /* As seções sempre ocupam a largura toda, então uma coluna simples basta. */
         .cfg-mods-content .script-mods-grid {
-            padding: 14px;
-            display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 12px;
-            background: #0c161f;
-            border-radius: 10px;
+            display: flex; flex-direction: column; gap: 12px;
+            padding: 14px; background: #0c161f; border-radius: 10px;
         }
-        .cfg-mods-content .script-mods-title,
-        .cfg-mods-content .script-mods-wide { grid-column: 1 / -1; }
-        .cfg-mods-content .cfg-row {
-            min-width: 0;
-            padding: 12px !important;
-            border-radius: 8px !important;
+        .cfg-mods-content .script-mods-title {
+            font-size: 17px; font-weight: bold; color: #63b3ed;
+            border-bottom: 1px solid #1a2d3a; padding-bottom: 10px;
         }
-        .cfg-mods-content .cfg-label span { display: block; margin-top: 4px; line-height: 1.35; }
-        .script-mod-category { grid-column:1/-1;display:block;min-width:0;border:1px solid #23394a;border-radius:10px;background:#0a141c;overflow:visible; }
-        .script-mod-category > h3 { margin:0;padding:10px 12px;display:flex;align-items:center;gap:8px;color:#d9c38c;font-size:14px;background:#101e28;border-bottom:1px solid #23394a; }
-        .script-mod-category-grid { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;padding:10px;align-items:stretch; }
-        .cfg-window.script-mods-open { width:min(920px,94vw) !important;height:min(780px,92vh) !important;max-width:94vw !important;max-height:92vh !important; }
-        .cfg-window.script-mods-open .cfg-body { min-height:0;overflow:hidden !important; }
-        .cfg-mods-content { width:100%;height:100%;min-width:0;overflow:auto;box-sizing:border-box; }
-        .script-mod-category-grid > .cfg-row { box-sizing:border-box;width:100%;min-width:0;height:100%;display:flex;flex-direction:column;align-items:stretch;justify-content:center;gap:6px; }
-        .script-mod-category-grid > label.cfg-row { flex-direction:row;align-items:flex-start !important;justify-content:flex-start;gap:10px !important; }
-        .script-mod-category-grid > label.cfg-row > input[type="checkbox"] { flex:0 0 auto;width:18px;height:18px;margin:1px 0 0;accent-color:#c8a24e; }
-        .script-mod-category-grid > label.cfg-row > .cfg-label { flex:1;min-width:0;margin:0; }
-        .script-mod-category-grid .cfg-seg { width:100%;align-items:stretch; }
-        .script-mod-category-grid .cfg-seg-btn { min-width:0;white-space:normal;line-height:1.2; }
-        .script-mod-category-grid > .cfg-row.script-mods-wide { grid-column:1/-1; }
-        .script-mod-category-grid > .cfg-row:only-child { grid-column:1/-1; }
+
+        .script-mod-category { min-width: 0; border: 1px solid #23394a; border-radius: 10px; background: #0a141c; }
+        .script-mod-category > h3 {
+            margin: 0; padding: 10px 12px; display: flex; align-items: center; gap: 8px;
+            color: #d9c38c; font-size: 14px; background: #101e28;
+            border-bottom: 1px solid #23394a; border-radius: 9px 9px 0 0;
+        }
+        .script-mod-category-grid {
+            display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px; padding: 10px; align-items: stretch;
+        }
+        .script-mod-category-grid > .cfg-row {
+            box-sizing: border-box; min-width: 0; height: 100%; margin: 0;
+            padding: 12px; border-radius: 8px; background: #14222d; border: 1px solid #1a2d3a;
+            display: flex; flex-direction: column; gap: 8px; justify-content: flex-start;
+        }
+        .script-mod-category-grid > .cfg-row.script-mods-wide,
+        .script-mod-category-grid > .cfg-row:only-child { grid-column: 1 / -1; }
+
+        /* Linha de liga/desliga: caixa à esquerda, rótulo e descrição à direita. */
+        .script-mod-category-grid > label.cfg-row { flex-direction: row; align-items: flex-start; cursor: pointer; }
+        .cfg-mods-content .cfg-row input[type="checkbox"] {
+            flex: 0 0 auto; width: 18px; height: 18px; margin: 1px 0 0; cursor: pointer; accent-color: #c8a24e;
+        }
+        .cfg-mods-content .cfg-label { flex: 1; min-width: 0; margin: 0; }
+        .cfg-mods-content .cfg-label b { color: #e2e8f0; font-size: 14px; }
+        .cfg-mods-content .cfg-label span { display: block; margin-top: 4px; line-height: 1.35; color: #a0aec0; font-size: 11px; }
+
+        /* Sub-opções agrupadas dentro de uma linha (recursos da hunt, por exemplo). */
+        .cfg-mods-sublist { display: flex; flex-direction: column; gap: 2px; }
+        .cfg-mods-sublist > label { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; padding: 5px 0; }
+        .cfg-mods-sublist .cfg-label b { font-size: 12px; }
+
+        /* margin-top:auto alinha as barras segmentadas na base do cartão, para que
+           descrições de tamanhos diferentes não deixem os botões desencontrados. */
+        .script-mod-category-grid .cfg-seg { display: flex; gap: 4px; width: 100%; align-items: stretch; margin-top: auto; }
+        .script-mod-category-grid .cfg-seg-btn { min-width: 0; white-space: normal; line-height: 1.2; }
+        .script-mod-category-grid .cfg-seg > .cfg-seg-btn { flex: 1; }
         .script-mod-category-grid input:not([type="checkbox"]):not([type="radio"]),
-        .script-mod-category-grid select { box-sizing:border-box;max-width:100%; }
-        .cfg-font-file-row { display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px; }
-        .cfg-font-file-name { min-width:0;flex:1;color:#91a4b2;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+        .script-mod-category-grid select { box-sizing: border-box; max-width: 100%; width: 100%; }
+        .cfg-mods-field {
+            background: #0c161f; color: #e2e8f0; border: 1px solid #273f52;
+            border-radius: 6px; padding: 7px;
+        }
+        .cfg-font-file-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .cfg-font-file-name { min-width: 0; flex: 1; color: #91a4b2; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        .cfg-sell-confirm { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+        .cfg-sell-confirm > * { flex: 1; min-width: 180px; }
+        #cfg-sell-selected-list { display: flex; flex-direction: column; gap: 4px; max-height: 120px; overflow-y: auto; padding-right: 4px; }
+        .cfg-sell-dd-wrap { position: relative; }
+        #cfg-sell-dd-btn { width: 100%; text-align: left; background: #0c161f; color: #e2e8f0; border: 1px solid #273f52; padding: 6px 10px; border-radius: 4px; cursor: pointer; }
+        #cfg-sell-dropdown-menu {
+            display: none; position: absolute; top: 100%; right: 0; width: 100%; background: #14222d;
+            border: 1px solid #273f52; border-radius: 4px; z-index: 10; box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            margin-top: 4px; padding: 6px; box-sizing: border-box;
+        }
+        #cfg-sell-search { background: #0c161f; color: #e2e8f0; border: 1px solid #273f52; border-radius: 4px; padding: 6px; outline: none; margin-bottom: 6px; }
+        #cfg-sell-dropdown { max-height: 150px; overflow-y: auto; }
         @media (max-width: 720px) {
-            .cfg-mods-content .script-mods-grid { grid-template-columns: 1fr; }
-            .cfg-mods-content .script-mods-title,
-            .cfg-mods-content .script-mods-wide { grid-column: auto; }
-            .script-mod-category { grid-column:auto; }
-            .script-mod-category-grid { grid-template-columns:1fr; }
-            .script-mod-category-grid > .cfg-row.script-mods-wide { grid-column:auto; }
+            .script-mod-category-grid { grid-template-columns: 1fr; }
         }
 
         .hunt-drop-tooltip {
@@ -1678,9 +1776,6 @@
     function isGuardLegendaryActive() { return localStorage.getItem(STORAGE_GUARD_LEGENDARY) !== 'false'; }
     function setGuardLegendary(val) { localStorage.setItem(STORAGE_GUARD_LEGENDARY, val ? 'true' : 'false'); }
 
-    function isGuardSellLockActive() { return localStorage.getItem(STORAGE_GUARD_SELL_LOCK) !== 'false'; }
-    function setGuardSellLock(val) { localStorage.setItem(STORAGE_GUARD_SELL_LOCK, val ? 'true' : 'false'); }
-
     function isHaCompact() { return localStorage.getItem(STORAGE_HA_COMPACT) === 'true'; }
     function setHaCompact(val) { localStorage.setItem(STORAGE_HA_COMPACT, val ? 'true' : 'false'); }
     function isHaDropsVisible() { return localStorage.getItem(STORAGE_HA_DROPS) === 'true'; }
@@ -1844,9 +1939,155 @@
     }
     function getLastHunt() { return localStorage.getItem(STORAGE_LAST_HUNT) || null; }
 
+    // O HUD (.phud-tloc) sabe onde o personagem está mesmo com o mapa fechado e com
+    // o mapa simplificado desligado — os dois casos em que buildSimpleList() nunca
+    // roda e STORAGE_LAST_HUNT ficaria desatualizado. Só grava o que o mapa resolve,
+    // para nunca guardar um nome que teleportToTarget() não conseguiria encontrar.
+    function resolveHuntNameFromHud() {
+        const location = getCurrentHuntLocation();
+        if (!location || isCityName(location)) return null;
+        const marker = findMappedHunt(location);
+        return marker ? (getMarkerName(marker) || location) : null;
+    }
+
+    function rememberCurrentHuntFromHud() {
+        const huntName = resolveHuntNameFromHud();
+        if (huntName) saveLastHunt(huntName);
+    }
+
+    // O retorno pendente precisa sobreviver ao location.reload(): sem isso o jogador
+    // reaparece na hunt de escala, que gera XP, renova o timer de inatividade e faz o
+    // auto-reconnect nunca mais disparar — deixando-o farmando a hunt errada em silêncio.
+    // `reloaded` garante que a página seja recarregada no máximo uma vez por pendência,
+    // evitando um ciclo de reloads. Pendências velhas são descartadas porque o jogador
+    // pode ter mudado de hunt por conta própria entre uma sessão e outra.
+    const RECONNECT_PENDING_TTL_MS = 10 * 60 * 1000;
+    function getPendingReconnectReturn() {
+        const stored = localStorage.getItem(STORAGE_RECONNECT_PENDING);
+        if (!stored) return null;
+        try {
+            const pending = JSON.parse(stored);
+            if (!pending || typeof pending.hunt !== 'string' || !pending.hunt) throw new Error('formato inválido');
+            if (Date.now() - Number(pending.savedAt || 0) > RECONNECT_PENDING_TTL_MS) throw new Error('expirado');
+            return { hunt: pending.hunt, attempts: Number(pending.attempts) || 0, reloaded: Boolean(pending.reloaded) };
+        } catch {
+            localStorage.removeItem(STORAGE_RECONNECT_PENDING);
+            return null;
+        }
+    }
+
+    function setPendingReconnectReturn(hunt, { attempts = 0, reloaded = false } = {}) {
+        localStorage.setItem(STORAGE_RECONNECT_PENDING, JSON.stringify({ hunt, attempts, reloaded, savedAt: Date.now() }));
+    }
+
+    function clearPendingReconnectReturn() {
+        localStorage.removeItem(STORAGE_RECONNECT_PENDING);
+    }
+
     function getCurrentHuntNameForReconnect() {
         const currentMarkerName = document.querySelector('.hunt-marker.here .hunt-name')?.textContent?.trim();
-        return currentMarkerName || getLastHunt();
+        if (currentMarkerName && !isCityName(currentMarkerName)) return currentMarkerName;
+        const hudHunt = resolveHuntNameFromHud();
+        if (hudHunt) return hudHunt;
+        const lastHunt = getLastHunt();
+        return lastHunt && !isCityName(lastHunt) ? lastHunt : null;
+    }
+
+    // Um clique despachado não prova que o jogo processou o teleporte, então a chegada
+    // é confirmada pelo HUD. O nome exato do alvo é a única evidência forte; a troca de
+    // local só vale como evidência secundária sob duas condições:
+    //   - havia um local anterior conhecido. Com o HUD vazio (`.phud-tloc` ausente, o que
+    //     acontece justamente quando a conexão cai) qualquer leitura seria "diferente" e
+    //     confirmaria uma chegada que nunca ocorreu;
+    //   - o novo valor se repete em duas leituras seguidas, para que um rótulo com parte
+    //     variável (contador, timer) não seja lido como mudança de lugar.
+    async function waitForArrivalAt(huntName, previousLocation, timeoutMs = 6000) {
+        const targetName = getCleanHuntName(huntName);
+        const deadline = Date.now() + timeoutMs;
+        let previousReading = null;
+        while (Date.now() < deadline) {
+            const current = getCurrentHuntLocation();
+            if (current) {
+                if (targetName && getCleanHuntName(current) === targetName) return true;
+                if (previousLocation && current !== previousLocation && current === previousReading) return true;
+            }
+            previousReading = current;
+            await new Promise(resolve => setTimeout(resolve, 150));
+        }
+        return false;
+    }
+
+    async function teleportForReconnect(huntName, attempts = 3) {
+        for (let attempt = 1; attempt <= attempts; attempt += 1) {
+            const previousLocation = getCurrentHuntLocation();
+            const clicked = await teleportToTarget(huntName, { silent: true });
+            if (clicked && await waitForArrivalAt(huntName, previousLocation)) return true;
+            logAutoReconnectStatus(`Tentativa ${attempt}/${attempts} de ir para ${huntName} não confirmou a chegada.`, true);
+            await new Promise(resolve => setTimeout(resolve, 1200));
+        }
+        return false;
+    }
+
+    // Uma parada em outra hunt (e não numa cidade) mantém isInHuntContext() verdadeiro,
+    // então o auto-reconnect continua armado e tenta de novo sozinho caso o retorno
+    // falhe. Parar numa cidade o desarmava e deixava o jogador preso lá.
+    const RECONNECT_SCRATCH_HUNT = 'Paras';
+
+    // isCityMarker() só entende elementos do DOM (className/dataset), mas aqui os
+    // marcadores são objetos crus da API, onde a marcação de cidade vem em campos
+    // próprios. Sem esta checagem, uma cidade fora de CITY_NAMES seria escolhida como
+    // parada intermediária — e parar numa cidade é exatamente o que desarma o
+    // auto-reconnect e prende o jogador fora da hunt.
+    function isCityMarkerData(marker) {
+        const metadata = [marker?.type, marker?.category, marker?.kind, marker?.markerType, marker?.tag, marker?.group]
+            .filter(value => typeof value === 'string').join(' ');
+        return /\b(?:city|cidade|town|vila|village)\b/i.test(metadata);
+    }
+
+    function readMarkerLevel(marker) {
+        for (const value of [marker?.level, marker?.requiredLevel, marker?.minLevel]) {
+            const parsed = Number(value);
+            if (Number.isFinite(parsed) && parsed > 0) return parsed;
+        }
+        return NaN;
+    }
+
+    // Exige evidência positiva de que o marcador é uma hunt, em vez de apenas confiar
+    // na ausência de sinais de cidade: precisa do slug que clickMappedHunt() usa e de
+    // um nível declarado, que hunts têm e cidades não. Se nada passar no filtro, quem
+    // chama recai em Cerulean — o comportamento antigo, conhecido e seguro.
+    function isReconnectScratchCandidate(marker, name) {
+        if (!name || !getMarkerSlug(marker)) return false;
+        if (isCityMarker(marker, name) || isCityMarkerData(marker)) return false;
+        return Number.isFinite(readMarkerLevel(marker));
+    }
+
+    function pickReconnectScratchHunt(currentHuntName) {
+        const currentName = getCleanHuntName(currentHuntName);
+        const trainerLevel = cachedTrainerLevel || readTrainerLevelFromDOM() || 1;
+        const candidates = [];
+        for (const marker of new Set(globalHuntMarkerData.values())) {
+            const name = getMarkerName(marker);
+            const cleanName = getCleanHuntName(name);
+            if (!cleanName || cleanName === currentName || !isReconnectScratchCandidate(marker, name)) continue;
+            const requiredLevel = readMarkerLevel(marker);
+            if (requiredLevel > trainerLevel) continue;
+            candidates.push({ name, cleanName, requiredLevel });
+        }
+        if (!candidates.length) return null;
+        const preferred = candidates.find(entry => entry.cleanName === getCleanHuntName(RECONNECT_SCRATCH_HUNT));
+        if (preferred) return preferred.name;
+        candidates.sort((a, b) => a.requiredLevel - b.requiredLevel || a.name.localeCompare(b.name));
+        return candidates[0].name;
+    }
+
+    async function teleportToScratchStopForReconnect(currentHuntName) {
+        await loadMapMarkersData();
+        await loadTrainerLevel();
+        const scratchHunt = pickReconnectScratchHunt(currentHuntName);
+        if (scratchHunt && await teleportForReconnect(scratchHunt, 2)) return scratchHunt;
+        logAutoReconnectStatus('Nenhuma hunt de escala disponível; usando Cerulean.', true);
+        return await teleportToCeruleanForReconnect() ? 'Cerulean' : null;
     }
 
     async function teleportToCeruleanForReconnect() {
@@ -1914,11 +2155,15 @@
         return true;
     }
 
-    async function teleportToTarget(huntName) {
+    // Devolve true somente quando um marcador da hunt foi realmente clicado. O
+    // auto-reconnect depende dessa distinção para saber se precisa tentar de novo;
+    // `silent` evita encher a tela de avisos durante as retentativas automáticas.
+    async function teleportToTarget(huntName, { silent = false } = {}) {
+        const notify = (message, options) => { if (!silent) showScriptNotice(message, options); };
         hideDropTooltip();
         if (!huntName) {
-            showScriptNotice('Nenhuma hunt definida.');
-            return;
+            notify('Nenhuma hunt definida.');
+            return false;
         }
 
         await loadMapMarkersData();
@@ -1934,26 +2179,26 @@
 
         mapWindow = mapWindow || document.querySelector('.map-window');
         if (!mapWindow) {
-            showScriptNotice('O mapa não abriu.', { isError: true });
-            return;
+            notify('O mapa não abriu.', { isError: true });
+            return false;
         }
 
         // Caminho direto confirmado pelo mapa da API: [data-guide="hunt-<slug>"].
-        if (clickMappedHunt(huntName)) return;
+        if (clickMappedHunt(huntName)) return true;
 
         // Compatibilidade com versões do jogo nas quais o marcador da área ainda
         // não foi montado no DOM.
         let allTabs = Array.from(mapWindow.querySelectorAll('.map-area:not(.locked)'));
         if (allTabs.length === 0) {
             const found = await tryFindMarkerAsync(huntName, 20, 100);
-            if (!found) showScriptNotice(`Hunt "${huntName}" não foi localizada.`, { isError: true });
-            return;
+            if (!found) notify(`Hunt "${huntName}" não foi localizada.`, { isError: true });
+            return found;
         }
 
         const activeTab = mapWindow.querySelector('.map-area.on');
         if (activeTab) {
             const found = await tryFindMarkerAsync(huntName, 10, 100);
-            if (found) return;
+            if (found) return true;
         }
 
         for (const tab of allTabs) {
@@ -1961,10 +2206,11 @@
 
             tab.click();
             const found = await tryFindMarkerAsync(huntName, 20, 100);
-            if (found) return;
+            if (found) return true;
         }
 
-        showScriptNotice(`Hunt "${huntName}" não foi localizada em nenhuma área.`, { isError: true });
+        notify(`Hunt "${huntName}" não foi localizada em nenhuma área.`, { isError: true });
+        return false;
     }
 
     function waitForElement(selector, timeoutMs) {
@@ -2175,184 +2421,162 @@
             const dropMode = getDropMode();
             const sellConfirmItems = getSellConfirmItems();
 
-            modsContent.innerHTML = `
-                <div class="script-mods-grid">
-                    <div class="script-mods-title" style="font-size: 17px; font-weight: bold; color: #63b3ed; border-bottom: 1px solid #1a2d3a; padding-bottom: 10px; margin-bottom: 2px;">⚙️ ${tr('modSettings')}</div>
+            // Cada linha é montada por um destes construtores e já nasce dentro da sua
+            // categoria. A versão anterior gerava uma lista plana e depois arrastava as
+            // linhas para as seções com closest('.cfg-row'), o que deixava a ordem do
+            // código sem relação com o resultado e jogava num "Outros recursos" tudo o
+            // que alguém esquecesse de listar.
+            const toggleRow = ({ className, prefKey, checked, title, description, wide = false }) => `
+                <label class="cfg-row${wide ? ' script-mods-wide' : ''}">
+                    <input type="checkbox" class="${className}"${prefKey ? ` data-pref-key="${prefKey}"` : ''}${checked ? ' checked' : ''}>
+                    <span class="cfg-label"><b>${title}</b><span>${description}</span></span>
+                </label>`;
 
-                    <div class="cfg-row script-mods-wide" style="background:#14222d;padding:10px;border-radius:6px;border:1px solid #1a2d3a;margin:0;">
-                        <div class="cfg-label" style="margin-bottom:7px;">
-                            <b style="color:#e2e8f0;font-size:14px;">Fonte do jogo</b>
-                            <span style="color:#a0aec0;font-size:11px;">Aplica a mesma família tipográfica a todas as janelas e controles.</span>
-                        </div>
-                        <select class="cfg-game-font" style="width:100%;background:#0c161f;color:#e2e8f0;border:1px solid #273f52;border-radius:6px;padding:7px;">
-                            <option value="barlow">Barlow (original)</option>
-                            <option value="verdana">Verdana</option>
-                            <option value="arial">Arial</option>
-                            <option value="system">Fonte do sistema</option>
-                            <option value="cinzel">Cinzel</option>
-                            <option value="custom">Personalizada</option>
-                        </select>
-                        <input class="cfg-custom-font" type="text" placeholder='Ex.: "Trebuchet MS", sans-serif' style="width:100%;margin-top:7px;background:#0c161f;color:#e2e8f0;border:1px solid #273f52;border-radius:6px;padding:7px;">
-                        <div class="cfg-font-file-row">
-                            <input class="cfg-custom-font-file" type="file" accept=".woff,.woff2,.ttf,.otf,font/woff,font/woff2,font/ttf,font/otf" hidden>
-                            <button class="cfg-seg-btn cfg-choose-font-file" type="button">Abrir arquivo de fonte…</button>
-                            <span class="cfg-font-file-name">${escapeHTML(localStorage.getItem(STORAGE_CUSTOM_FONT_NAME) || 'Nenhum arquivo selecionado')}</span>
-                        </div>
+            const segmentRow = ({ id, extraClass = '', title, description, buttons }) => `
+                <div class="cfg-row ${extraClass}"${id ? ` id="${id}"` : ''}>
+                    <div class="cfg-label"><b>${title}</b><span>${description}</span></div>
+                    <div class="cfg-seg">
+                        ${buttons.map(([className, label, on]) => `<button type="button" class="cfg-seg-btn ${className}${on ? ' on' : ''}">${label}</button>`).join('')}
                     </div>
+                </div>`;
 
-                    <label class="cfg-row script-mods-wide" style="background:#14222d;padding:10px;border-radius:6px;border:1px solid #1a2d3a;margin:0;display:flex;align-items:center;gap:9px;">
-                        <input class="cfg-auto-reconnect" type="checkbox">
-                        <span class="cfg-label"><b style="color:#e2e8f0;font-size:14px;">Auto-reconnect da hunt</b><span style="color:#a0aec0;font-size:11px;">Vai a Cerulean, aguarda 10 segundos e retorna à hunt quando ela fica sem atividade.</span></span>
-                    </label>
-                    ${[
-                        ['cfg-unified-fonts', STORAGE_UNIFIED_FONTS, 'Fonte unificada', 'Aplica a fonte escolhida às janelas e controles do jogo.'],
-                        ['cfg-custom-scrollbars', STORAGE_CUSTOM_SCROLLBARS, 'Scrollbars minimalistas', 'Substitui as barras brancas pelo estilo transparente.'],
-                        ['cfg-compare-window', STORAGE_COMPARE_WINDOW, 'Comparação de hunts', 'Exibe a janela móvel e redimensionável de comparação.'],
-                        ['cfg-mark-quick-buy', STORAGE_MARK_QUICK_BUY, 'Compras rápidas no Mark', 'Mostra 1, 10, 100, 1.000 e 10.000 em cada produto.'],
-                        ['cfg-mark-quality-picker', STORAGE_MARK_QUALITY_PICKER, 'Seletor de qualidades do Mark', 'Agrupa as qualidades em um seletor múltiplo.'],
-                        ['cfg-show-quality-potential', STORAGE_SHOW_QUALITY_POTENTIAL, 'Porcentagem de potencial', 'Exibe uma estimativa (75% Quality + 25% IV) junto à qualidade no time, log de capturas e venda em massa. Não é um valor oficial do jogo, mas estima a força do pokémon.']
-                    ].map(([className, key, title, description]) => `
-                        <label class="cfg-row" style="background:#14222d;padding:10px;border-radius:6px;border:1px solid #1a2d3a;margin:0;display:flex;align-items:center;gap:9px;">
-                            <input class="${className}" data-pref-key="${key}" type="checkbox" ${preferenceEnabled(key) ? 'checked' : ''}>
-                            <span class="cfg-label"><b style="color:#e2e8f0;font-size:14px;">${title}</b><span style="color:#a0aec0;font-size:11px;">${description}</span></span>
-                        </label>`).join('')}
-                    
-                    <div class="cfg-row" style="background: #14222d; padding: 10px; border-radius: 6px; border: 1px solid #1a2d3a; margin: 0;">
-                        <div class="cfg-label" style="margin-bottom: 6px;">
-                            <b style="color: #e2e8f0; font-size: 14px;">${tr('simplifiedMap')}</b>
-                            <span style="color: #a0aec0; font-size: 11px;">${tr('simplifiedMapDesc')}</span>
-                        </div>
-                        <div class="cfg-seg" style="display: flex; gap: 4px;">
-                            <button class="cfg-seg-btn ${mapActive ? 'on' : ''} btn-map-on" type="button" style="flex:1;">${tr('enabled')}</button>
-                            <button class="cfg-seg-btn ${!mapActive ? 'on' : ''} btn-map-off" type="button" style="flex:1;">${tr('disabled')}</button>
-                        </div>
-                    </div>
-
-                    <div class="cfg-row ${!mapActive ? 'mod-disabled' : ''}" id="sub-map-feature-row" style="background: #14222d; padding: 10px; border-radius: 6px; border: 1px solid #1a2d3a; margin: 0;">
-                        <div class="cfg-label" style="margin-bottom: 6px;">
-                            <b style="color: #e2e8f0; font-size: 14px;">${tr('dropsPreview')}</b>
-                            <span style="color: #a0aec0; font-size: 11px;">${tr('dropsPreviewDesc')}</span>
-                        </div>
-                        <div class="cfg-seg" style="display: flex; gap: 4px;">
-                            <button class="cfg-seg-btn ${dropMode === 'hover' ? 'on' : ''} btn-drop-hover" type="button" style="flex:1;">Hover</button>
-                            <button class="cfg-seg-btn ${dropMode === 'icon' ? 'on' : ''} btn-drop-icon" type="button" style="flex:1;">${tr('icon')}</button>
-                            <button class="cfg-seg-btn ${dropMode === 'off' ? 'on' : ''} btn-drop-off" type="button" style="flex:1;">${tr('hidden')}</button>
-                        </div>
-                    </div>
-
-                    <div class="cfg-row" style="background: #14222d; padding: 10px; border-radius: 6px; border: 1px solid #1a2d3a; margin: 0;">
-                        <div class="cfg-label" style="margin-bottom: 6px;">
-                            <b style="color: #e2e8f0; font-size: 14px;">${tr('navAction')}</b>
-                            <span style="color: #a0aec0; font-size: 11px;">${tr('navActionDesc')}</span>
-                        </div>
-                        <div class="cfg-seg" style="display: flex; gap: 4px;">
-                            <button class="cfg-seg-btn ${navMode === 'fav' ? 'on' : ''} btn-nav-fav" type="button" style="flex:1;">★ ${tr('favorite')}</button>
-                            <button class="cfg-seg-btn ${navMode === 'last' ? 'on' : ''} btn-nav-last" type="button" style="flex:1;">↺ ${tr('last')}</button>
-                            <button class="cfg-seg-btn ${navMode === 'off' ? 'on' : ''} btn-nav-off" type="button" style="flex:1;">${tr('none')}</button>
-                        </div>
-                    </div>
-
-                    <div class="cfg-row" style="background: #14222d; padding: 10px; border-radius: 6px; border: 1px solid #1a2d3a; margin: 0;">
-                        <div class="cfg-label" style="margin-bottom: 6px;">
-                            <b style="color: #e2e8f0; font-size: 14px;">${tr('chatInterface')}</b>
-                            <span style="color: #a0aec0; font-size: 11px;">${tr('chatInterfaceDesc')}</span>
-                        </div>
-                        <div class="cfg-seg" style="display: flex; gap: 4px;">
-                            <button class="cfg-seg-btn ${chatActiveState ? 'on' : ''} btn-chat-on" type="button" style="flex:1;">${tr('show')}</button>
-                            <button class="cfg-seg-btn ${!chatActiveState ? 'on' : ''} btn-chat-off" type="button" style="flex:1;">${tr('hide')}</button>
-                        </div>
-                    </div>
-
-                    <div class="cfg-row" style="background: #14222d; padding: 10px; border-radius: 6px; border: 1px solid #1a2d3a; margin: 0;">
-                        <div class="cfg-label" style="margin-bottom: 6px;">
-                            <b style="color: #e2e8f0; font-size: 14px;">Pokédex Fast Travel</b>
-                            <span style="color: #a0aec0; font-size: 11px;">${tr('dexFastTravelDesc')}</span>
-                        </div>
-                        <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; padding: 4px 0;">
-                            <input type="checkbox" class="btn-dex-ft" ${isDexFastTravelActive() ? 'checked' : ''} style="width:18px; height:18px; cursor:pointer; accent-color:#3182ce;">
-                            <span style="color:#a0aec0; font-size:12px;">${tr('enableDexFastTravel')}</span>
-                        </label>
-                    </div>
-
-                    <div class="cfg-row" style="background: #14222d; padding: 10px; border-radius: 6px; border: 1px solid #1a2d3a; margin: 0;">
-                        <div class="cfg-label" style="margin-bottom: 6px;">
-                            <b style="color: #e2e8f0; font-size: 14px;">${tr('selectAllGuards')}</b>
-                            <span style="color: #a0aec0; font-size: 11px;">${tr('selectAllGuardsDesc')}</span>
-                        </div>
-                        <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; padding: 4px 0;">
-                            <input type="checkbox" class="btn-guard-leg" ${isGuardLegendaryActive() ? 'checked' : ''} style="width:18px; height:18px; cursor:pointer; accent-color:#3182ce;">
-                            <span style="color:#a0aec0; font-size:12px;">${tr('protectLegendary')}</span>
-                        </label>
-                        <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; padding: 4px 0;">
-                            <input type="checkbox" class="btn-guard-lock" ${isGuardSellLockActive() ? 'checked' : ''} style="width:18px; height:18px; cursor:pointer; accent-color:#3182ce;">
-                            <span style="color:#a0aec0; font-size:12px;">${tr('protectLocked')}</span>
-                        </label>
-                    </div>
-
-                    <div class="cfg-row script-mods-wide" style="background:#14222d;padding:10px;border-radius:6px;border:1px solid #1a2d3a;margin:0;">
-                        <div class="cfg-label" style="margin-bottom:8px;">
-                            <b style="color:#e2e8f0;font-size:14px;">${tr('huntFeatures')}</b>
-                            <span style="color:#a0aec0;font-size:11px;">${tr('huntFeaturesDesc')}</span>
-                        </div>
-                        ${[
-                            ['btn-hunt-market', isHuntMarketActive(), tr('marketHud'), tr('marketHudDesc')],
-                            ['btn-hunt-bulk', isHuntBulkBuyActive(), tr('bulkBuy'), tr('bulkBuyDesc')],
-                            ['btn-hunt-sell', isHuntSellActive(), tr('huntSell'), tr('huntSellDesc')],
-                            ['btn-mark-enhancements', isMarkEnhancementsActive(), tr('cityMark'), tr('cityMarkDesc')]
-                        ].map(([className, checked, title, description]) => `
-                            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:5px 0;">
-                                <input type="checkbox" class="${className}" ${checked ? 'checked' : ''} style="width:18px;height:18px;cursor:pointer;accent-color:#3182ce;">
-                                <span><b style="display:block;color:#e2e8f0;font-size:12px;">${title}</b><small style="color:#a0aec0;">${description}</small></span>
+            const sublistRow = ({ title, description, items }) => `
+                <div class="cfg-row script-mods-wide">
+                    <div class="cfg-label"><b>${title}</b><span>${description}</span></div>
+                    <div class="cfg-mods-sublist">
+                        ${items.map(([className, checked, itemTitle, itemDescription]) => `
+                            <label>
+                                <input type="checkbox" class="${className}"${checked ? ' checked' : ''}>
+                                <span class="cfg-label"><b>${itemTitle}</b><span>${itemDescription}</span></span>
                             </label>`).join('')}
                     </div>
+                </div>`;
 
-                    <div class="cfg-row script-mods-wide" style="background: #14222d; padding: 10px; border-radius: 6px; border: 1px solid #1a2d3a; margin: 0; display:flex; gap:12px; align-items:flex-start; flex-wrap:wrap;">
-                        <div class="cfg-label" style="flex:1;">
-                            <b style="color: #e2e8f0; font-size: 14px;">${tr('sellConfirmation')}</b>
-                            <span style="color: #a0aec0; font-size: 11px; display:block; margin-top:4px;">${tr('protectedItems')}</span>
-                        </div>
-                        
-                        <div id="cfg-sell-selected-list" style="flex:1; display:flex; flex-direction:column; gap:4px; max-height:120px; overflow-y:auto; padding-right:4px;">
-                        </div>
-                        
-                        <div style="flex:1; position:relative; min-width:180px;">
-                            <button type="button" id="cfg-sell-dd-btn" style="width:100%; text-align:left; background:#0c161f; color:#e2e8f0; border:1px solid #273f52; padding:6px 10px; border-radius:4px; cursor:pointer;">${tr('selectItems')}</button>
-                            <div id="cfg-sell-dropdown-menu" style="display:none; position:absolute; top:100%; right:0; width:100%; background:#14222d; border:1px solid #273f52; border-radius:4px; z-index:10; box-shadow:0 4px 6px rgba(0,0,0,0.3); margin-top:4px; padding:6px; box-sizing:border-box;">
-                                <input type="text" id="cfg-sell-search" placeholder="${tr('search')}" style="width:100%; box-sizing:border-box; background:#0c161f; color:#e2e8f0; border:1px solid #273f52; border-radius:4px; padding:6px; outline:none; margin-bottom:6px;">
-                                <div id="cfg-sell-dropdown" style="max-height:150px; overflow-y:auto;">
+            const category = (icon, title, rows) => `
+                <section class="script-mod-category">
+                    <h3><span>${icon}</span>${title}</h3>
+                    <div class="script-mod-category-grid">${rows.join('')}</div>
+                </section>`;
+
+            const prefToggle = (className, key, title, description) =>
+                toggleRow({ className, prefKey: key, checked: preferenceEnabled(key), title, description });
+
+            modsContent.innerHTML = `
+                <div class="script-mods-grid">
+                    <div class="script-mods-title">⚙️ ${tr('modSettings')}</div>
+
+                    ${category('🗺️', 'Mapa e navegação', [
+                        segmentRow({
+                            title: tr('simplifiedMap'), description: tr('simplifiedMapDesc'),
+                            buttons: [['btn-map-on', tr('enabled'), mapActive], ['btn-map-off', tr('disabled'), !mapActive]]
+                        }),
+                        segmentRow({
+                            id: 'sub-map-feature-row', extraClass: mapActive ? '' : 'mod-disabled',
+                            title: tr('dropsPreview'), description: tr('dropsPreviewDesc'),
+                            buttons: [
+                                ['btn-drop-hover', 'Hover', dropMode === 'hover'],
+                                ['btn-drop-icon', tr('icon'), dropMode === 'icon'],
+                                ['btn-drop-off', tr('hidden'), dropMode === 'off']
+                            ]
+                        }),
+                        segmentRow({
+                            title: tr('navAction'), description: tr('navActionDesc'),
+                            buttons: [
+                                ['btn-nav-fav', `★ ${tr('favorite')}`, navMode === 'fav'],
+                                ['btn-nav-last', `↺ ${tr('last')}`, navMode === 'last'],
+                                ['btn-nav-off', tr('none'), navMode === 'off']
+                            ]
+                        }),
+                        toggleRow({
+                            className: 'btn-dex-ft', checked: isDexFastTravelActive(),
+                            title: 'Pokédex Fast Travel', description: tr('dexFastTravelDesc')
+                        })
+                    ])}
+
+                    ${category('⚔️', 'Hunts', [
+                        toggleRow({
+                            className: 'cfg-auto-reconnect', checked: isAutoReconnectActive(),
+                            title: 'Auto-reconnect da hunt',
+                            description: 'Quando a hunt para de responder, faz uma parada de 10 segundos em outra hunt de nível baixo e retorna para a hunt original.'
+                        }),
+                        prefToggle('cfg-compare-window', STORAGE_COMPARE_WINDOW, 'Comparação de hunts', 'Exibe a janela móvel e redimensionável de comparação.'),
+                        sublistRow({
+                            title: tr('huntFeatures'), description: tr('huntFeaturesDesc'),
+                            items: [
+                                ['btn-hunt-market', isHuntMarketActive(), tr('marketHud'), tr('marketHudDesc')],
+                                ['btn-hunt-bulk', isHuntBulkBuyActive(), tr('bulkBuy'), tr('bulkBuyDesc')],
+                                ['btn-hunt-sell', isHuntSellActive(), tr('huntSell'), tr('huntSellDesc')]
+                            ]
+                        })
+                    ])}
+
+                    ${category('🏪', 'Loja do Mark', [
+                        prefToggle('cfg-mark-quick-buy', STORAGE_MARK_QUICK_BUY, 'Compras rápidas no Mark', 'Mostra 1, 10, 100, 1.000 e 10.000 em cada produto.'),
+                        prefToggle('cfg-mark-quality-picker', STORAGE_MARK_QUALITY_PICKER, 'Seletor de qualidades do Mark', 'Agrupa as qualidades em um seletor múltiplo.'),
+                        toggleRow({
+                            className: 'btn-mark-enhancements', checked: isMarkEnhancementsActive(),
+                            title: tr('cityMark'), description: tr('cityMarkDesc')
+                        })
+                    ])}
+
+                    ${category('🐾', 'Pokémon', [
+                        prefToggle('cfg-show-quality-potential', STORAGE_SHOW_QUALITY_POTENTIAL, 'Porcentagem de potencial',
+                            'Exibe uma estimativa (75% qualidade + 25% IV) junto à qualidade no time, log de capturas e venda em massa. Não é um valor oficial do jogo, mas estima a força do Pokémon.')
+                    ])}
+
+                    ${category('🛡️', 'Proteções e vendas', [
+                        toggleRow({
+                            className: 'btn-guard-leg', checked: isGuardLegendaryActive(),
+                            title: tr('protectLegendary'), description: tr('selectAllGuardsDesc')
+                        }),
+                        `<div class="cfg-row script-mods-wide">
+                            <div class="cfg-label"><b>${tr('sellConfirmation')}</b><span>${tr('protectedItems')}</span></div>
+                            <div class="cfg-sell-confirm">
+                                <div id="cfg-sell-selected-list"></div>
+                                <div class="cfg-sell-dd-wrap">
+                                    <button type="button" id="cfg-sell-dd-btn">${tr('selectItems')}</button>
+                                    <div id="cfg-sell-dropdown-menu">
+                                        <input type="text" id="cfg-sell-search" placeholder="${tr('search')}">
+                                        <div id="cfg-sell-dropdown"></div>
+                                    </div>
                                 </div>
                             </div>
-                        </div>
-                    </div>
+                        </div>`
+                    ])}
+
+                    ${category('🪟', 'Interface', [
+                        prefToggle('cfg-custom-scrollbars', STORAGE_CUSTOM_SCROLLBARS, 'Scrollbars minimalistas', 'Substitui as barras brancas pelo estilo transparente.'),
+                        segmentRow({
+                            title: tr('chatInterface'), description: tr('chatInterfaceDesc'),
+                            buttons: [['btn-chat-on', tr('show'), chatActiveState], ['btn-chat-off', tr('hide'), !chatActiveState]]
+                        })
+                    ])}
+
+                    ${category('🔤', 'Fontes', [
+                        `<div class="cfg-row script-mods-wide">
+                            <div class="cfg-label">
+                                <b>Fonte do jogo</b>
+                                <span>Aplica a mesma família tipográfica a todas as janelas e controles.</span>
+                            </div>
+                            <select class="cfg-game-font cfg-mods-field">
+                                <option value="barlow">Barlow (original)</option>
+                                <option value="verdana">Verdana</option>
+                                <option value="arial">Arial</option>
+                                <option value="system">Fonte do sistema</option>
+                                <option value="cinzel">Cinzel</option>
+                                <option value="custom">Personalizada</option>
+                            </select>
+                            <input class="cfg-custom-font cfg-mods-field" type="text" placeholder='Ex.: "Trebuchet MS", sans-serif'>
+                            <div class="cfg-font-file-row">
+                                <input class="cfg-custom-font-file" type="file" accept=".woff,.woff2,.ttf,.otf,font/woff,font/woff2,font/ttf,font/otf" hidden>
+                                <button class="cfg-seg-btn cfg-choose-font-file" type="button">Abrir arquivo de fonte…</button>
+                                <span class="cfg-font-file-name">${escapeHTML(localStorage.getItem(STORAGE_CUSTOM_FONT_NAME) || 'Nenhum arquivo selecionado')}</span>
+                            </div>
+                        </div>`,
+                        prefToggle('cfg-unified-fonts', STORAGE_UNIFIED_FONTS, 'Fonte unificada', 'Aplica a fonte escolhida às janelas e controles do jogo.')
+                    ])}
                 </div>
             `;
-
-            const modsGrid = modsContent.querySelector('.script-mods-grid');
-            const assignedRows = new Set();
-            const addCategory = (icon, title, selectors) => {
-                const rows = selectors.flatMap(selector => Array.from(modsGrid.querySelectorAll(selector)).map(element => element.closest('.cfg-row')))
-                    .filter(row => row && !assignedRows.has(row));
-                if (!rows.length) return;
-                const section = document.createElement('section');
-                section.className = 'script-mod-category';
-                section.innerHTML = `<h3><span>${icon}</span>${title}</h3><div class="script-mod-category-grid"></div>`;
-                const sectionGrid = section.querySelector('.script-mod-category-grid');
-                rows.forEach(row => { assignedRows.add(row); sectionGrid.appendChild(row); });
-                modsGrid.appendChild(section);
-            };
-            addCategory('🎨', 'Aparência e fontes', ['.cfg-game-font', '.cfg-unified-fonts', '.cfg-custom-scrollbars']);
-            addCategory('🗺️', 'Mapa e navegação', ['.btn-map-on', '#sub-map-feature-row', '.btn-nav-fav', '.btn-dex-ft']);
-            addCategory('🪟', 'Interface', ['.btn-chat-on']);
-            addCategory('⚔️', 'Hunts, lojas e Mark', ['.cfg-auto-reconnect', '.cfg-compare-window', '.cfg-mark-quick-buy', '.cfg-mark-quality-picker', '.btn-hunt-market']);
-            addCategory('🛡️', 'Proteções e vendas', ['.btn-guard-leg', '#cfg-sell-dd-btn']);
-            const remaining = Array.from(modsGrid.children).filter(element => element.classList.contains('cfg-row'));
-            if (remaining.length) {
-                const section = document.createElement('section');
-                section.className = 'script-mod-category';
-                section.innerHTML = '<h3><span>⚙️</span>Outros recursos</h3><div class="script-mod-category-grid"></div>';
-                remaining.forEach(row => section.querySelector('.script-mod-category-grid').appendChild(row));
-                modsGrid.appendChild(section);
-            }
 
             modsContent.querySelector('.cfg-game-font').value = getGameFont();
             modsContent.querySelector('.cfg-game-font').addEventListener('change', event => applyGameFont(event.target.value));
@@ -2455,9 +2679,6 @@
             
             modsContent.querySelector('.btn-guard-leg').addEventListener('change', (e) => {
                 setGuardLegendary(e.target.checked);
-            });
-            modsContent.querySelector('.btn-guard-lock').addEventListener('change', (e) => {
-                setGuardSellLock(e.target.checked);
             });
             modsContent.querySelector('.btn-hunt-market').addEventListener('change', e => {
                 setHuntMarketActive(e.target.checked);
