@@ -54,7 +54,7 @@
             return;
         }
         lastSocketMessageAt = Date.now();
-        if (isInHuntContext() && isHuntProgressMessage(message)) {
+        if (isHuntSocketMessage(message)) {
             lastHuntSocketActivityAt = Date.now();
         }
         if (message?.type === 'inventory') latestInventory = message.items || [];
@@ -96,8 +96,11 @@
     TrackedWebSocket.prototype = NativeWebSocket.prototype;
     Object.setPrototypeOf(TrackedWebSocket, NativeWebSocket);
     window.WebSocket = TrackedWebSocket;
+    // O patch de envio é a única forma de descobrir o slug da hunt: ele só aparece no
+    // `enter-hunt` que o próprio jogo manda quando o jogador clica no mapa.
     NativeWebSocket.prototype.send = function(data) {
         trackGameSocket(this);
+        observeOutgoingGameMessage(this, data);
         return nativeWebSocketSend.call(this, data);
     };
 
@@ -116,9 +119,131 @@
         return gameSocket?.readyState === NativeWebSocket.OPEN;
     }
 
+    // O jogo aceita a troca de hunt pelo próprio WebSocket: `leave-hunt` seguido de
+    // `enter-hunt` com o slug recoloca o personagem exatamente onde ele estava. Isso
+    // substitui o antigo desvio por uma hunt de escala (Paras), que tirava o jogador
+    // do lugar certo e ainda dependia de cliques no mapa para voltar.
+    const HUNT_SILENCE_MS = 10000;
+    const HUNT_REENTRY_DELAY_MS = 500;
+    const RECONNECT_COOLDOWN_MS = 5000;
+    const RECONNECT_CHECK_INTERVAL_MS = 1000;
+    // Com o socket fechado não há como enviar leave/enter; recarregar a página é a
+    // única saída, e só depois de uma janela longa para não brigar com a reconexão
+    // que o próprio jogo tenta fazer.
+    const SOCKET_DOWN_RELOAD_MS = 45000;
+    const HUNT_MESSAGE_TYPES = new Set(['field', 'field-init', 'field-kill', 'poke-xp', 'pending', 'catch-result']);
+
+    let currentHuntSlug = null;
+    let huntSlugRestored = false;
+    let socketDownSince = 0;
+    let reloadScheduled = false;
+    let lastHuntNameRefreshAt = 0;
+    let missingSlugLogged = false;
+
+    function isHuntSocketMessage(message) {
+        return HUNT_MESSAGE_TYPES.has(String(message?.type || '')) || isHuntProgressMessage(message);
+    }
+
+    function rememberHuntSlug(slug) {
+        const clean = String(slug || '').trim();
+        if (!clean) return;
+        missingSlugLogged = false;
+        currentHuntSlug = clean;
+        huntSlugRestored = true;
+        localStorage.setItem(STORAGE_RECONNECT_SLUG, clean);
+    }
+
+    // O slug fica no localStorage porque o script pode ser recarregado (F5, atualização
+    // da extensão) no meio de uma hunt, quando o `enter-hunt` original já passou e não
+    // seria visto de novo.
+    function getRememberedHuntSlug() {
+        if (!huntSlugRestored) {
+            huntSlugRestored = true;
+            currentHuntSlug = currentHuntSlug || localStorage.getItem(STORAGE_RECONNECT_SLUG) || null;
+            // Resíduo do auto-reconnect antigo, que guardava a hunt de retorno enquanto
+            // fazia a parada intermediária. Nada mais lê essa chave.
+            localStorage.removeItem('script_reconnect_pending_v1');
+        }
+        return currentHuntSlug;
+    }
+
+    // O HUD é a única fonte que fala desta aba; o slug lembrado mora no localStorage,
+    // que é compartilhado com as outras abas do jogo e pode ter sido gravado por uma
+    // delas. Por isso o local exibido agora tem prioridade, e o valor lembrado só entra
+    // quando o HUD não diz nada — justamente o caso em que a conexão caiu.
+    async function resolveCurrentHuntSlug() {
+        const location = getCurrentHuntLocation();
+        if (!location) return getRememberedHuntSlug();
+        if (isCityName(location)) return null;
+        await loadMapMarkersData();
+        const slug = getMarkerSlug(findMappedHunt(location));
+        if (slug) {
+            rememberHuntSlug(slug);
+            return slug;
+        }
+        // Com os marcadores carregados, um nome que o mapa não conhece significa que o
+        // personagem não está numa hunt — reentrar seria tirá-lo de onde ele quis ficar.
+        // Se o fetch do mapa falhou, não há como julgar o nome e o slug lembrado ainda
+        // é a melhor aposta.
+        return globalHuntMarkerData.size ? null : getRememberedHuntSlug();
+    }
+
+    function observeOutgoingGameMessage(socket, data) {
+        if (!String(socket?.url || '').includes('/ws') || typeof data !== 'string') return;
+        let message;
+        try {
+            message = JSON.parse(data);
+        } catch {
+            return;
+        }
+        if (message?.type === 'enter-hunt' && message.slug) {
+            rememberHuntSlug(message.slug);
+            lastHuntSocketActivityAt = Date.now();
+        }
+    }
+
     function logAutoReconnectStatus(message, isError = false) {
         const logger = isError ? console.warn : console.info;
         logger(`[PIW-QOL] Auto-reconnect: ${message}`);
+    }
+
+    // Sai e volta para a mesma hunt pelo WebSocket. O `leave-hunt` é enviado pelo
+    // socket direto (sendGameMessage), então passa pelo mesmo patch de envio — por
+    // isso nada aqui zera o slug lembrado.
+    async function rejoinCurrentHunt(reason) {
+        if (autoReconnectInProgress) return false;
+        // A trava e o cooldown são marcados antes de qualquer await: resolver o slug
+        // pode esperar o fetch dos marcadores do mapa, e nessa janela o intervalo de
+        // um segundo dispararia outras reentradas em paralelo.
+        autoReconnectInProgress = true;
+        lastAutoReconnectAt = Date.now();
+        try {
+            const slug = await resolveCurrentHuntSlug();
+            if (!slug) {
+                // Um aviso por episódio: o cooldown sozinho ainda repetiria a mensagem
+                // a cada cinco segundos enquanto o lugar não for reconhecido.
+                if (!missingSlugLogged) {
+                    missingSlugLogged = true;
+                    logAutoReconnectStatus('A hunt atual não pôde ser identificada; entre nela de novo pelo mapa.', true);
+                }
+                return false;
+            }
+            missingSlugLogged = false;
+            lastHuntSocketActivityAt = Date.now();
+            if (!sendGameMessage({ type: 'leave-hunt' })) {
+                logAutoReconnectStatus('WebSocket indisponível para sair da hunt.', true);
+                return false;
+            }
+            await new Promise(resolve => setTimeout(resolve, HUNT_REENTRY_DELAY_MS));
+            const entered = sendGameMessage({ type: 'enter-hunt', slug });
+            lastHuntSocketActivityAt = Date.now();
+            lastCaptureBarSignature = document.querySelector('[data-guide="capture-bar"]')?.innerHTML || '';
+            if (entered) logAutoReconnectStatus(`${reason} Reentrei em ${slug}.`);
+            else logAutoReconnectStatus(`${reason} O reenvio de enter-hunt para ${slug} falhou.`, true);
+            return entered;
+        } finally {
+            autoReconnectInProgress = false;
+        }
     }
 
     setInterval(async () => {
@@ -132,90 +257,39 @@
         }
         if (!isAutoReconnectActive() || autoReconnectInProgress) return;
         const now = Date.now();
-        const pendingReturn = getPendingReconnectReturn();
-        // Durante o reconnect o personagem passa por uma hunt de escala; gravá-la como
-        // "última hunt" apagaria justamente o destino que precisamos restaurar. Fica
-        // depois da guarda de isAutoReconnectActive() para não alterar o alvo do botão
-        // ↻ de quem nunca ligou o recurso.
-        if (!pendingReturn) rememberCurrentHuntFromHud();
+        // A verificação roda a cada segundo, mas o nome da hunt muda raramente: relê o
+        // HUD só de cinco em cinco segundos para não gravar no localStorage a cada tick.
+        if (now - lastHuntNameRefreshAt >= 5000) {
+            lastHuntNameRefreshAt = now;
+            rememberCurrentHuntFromHud();
+        }
 
-        // Um retorno não confirmado deixa o personagem na hunt de escala, que gera XP
-        // e zeraria o timer de inatividade — escondendo a falha e prendendo o jogador
-        // na hunt errada. Por isso o retorno pendente é retomado sozinho, sem depender
-        // do timer de hunt parada, e persiste entre recarregamentos da página.
-        if (pendingReturn) {
-            const target = pendingReturn.hunt;
-            if (getCleanHuntName(getCurrentHuntLocation()) === getCleanHuntName(target)) {
-                clearPendingReconnectReturn();
-                return;
-            }
-            if (now - lastAutoReconnectAt < 60000) return;
-            lastAutoReconnectAt = now;
-            autoReconnectInProgress = true;
-            const attempts = pendingReturn.attempts + 1;
-            setPendingReconnectReturn(target, { attempts, reloaded: pendingReturn.reloaded });
-            try {
-                logAutoReconnectStatus(`Retomando o retorno pendente para ${target} (rodada ${attempts})…`);
-                if (await teleportForReconnect(target)) {
-                    clearPendingReconnectReturn();
-                    lastHuntSocketActivityAt = Date.now();
-                    logAutoReconnectStatus(`De volta em ${target}.`);
-                } else if (attempts >= 3 && !pendingReturn.reloaded) {
-                    // Uma única recarga por pendência: `reloaded` é gravado antes do
-                    // reload para que a retomada seguinte não recarregue outra vez.
-                    setPendingReconnectReturn(target, { attempts: 0, reloaded: true });
-                    logAutoReconnectStatus(`Sem sucesso ao voltar para ${target}; recarregando a página e tentando de novo.`, true);
-                    setTimeout(() => location.reload(), 1500);
-                } else if (attempts >= 3) {
-                    clearPendingReconnectReturn();
-                    logAutoReconnectStatus(`Desisti de voltar para ${target}. Volte manualmente pelo mapa.`, true);
-                }
-            } finally {
-                autoReconnectInProgress = false;
+        if (!gameSocket || gameSocket.readyState !== NativeWebSocket.OPEN) {
+            if (!socketDownSince) {
+                socketDownSince = now;
+                logAutoReconnectStatus('WebSocket caiu; aguardando a reconexão do jogo.', true);
+            } else if (!reloadScheduled && now - socketDownSince >= SOCKET_DOWN_RELOAD_MS) {
+                reloadScheduled = true;
+                logAutoReconnectStatus('WebSocket continua fechado; recarregando a página.', true);
+                setTimeout(() => location.reload(), 1500);
             }
             return;
         }
+        socketDownSince = 0;
 
-        const connectionLost = !gameSocket || gameSocket.readyState !== NativeWebSocket.OPEN;
         const captureBarSignature = captureBar?.innerHTML || '';
-        if (!connectionLost && captureBar && captureBarSignature !== lastCaptureBarSignature) {
+        if (captureBar && captureBarSignature !== lastCaptureBarSignature) {
             lastCaptureBarSignature = captureBarSignature;
             lastHuntSocketActivityAt = now;
         }
-        const staleFor = now - lastHuntSocketActivityAt;
-        if (staleFor < 30000 || now - lastAutoReconnectAt < 60000) return;
-        lastAutoReconnectAt = now;
-        autoReconnectInProgress = true;
-        try {
-            const previousHunt = getCurrentHuntNameForReconnect();
-            if (!previousHunt) throw new Error('A hunt atual não pôde ser identificada.');
-            const scratchStop = await teleportToScratchStopForReconnect(previousHunt);
-            if (!scratchStop) throw new Error('Nenhum destino intermediário foi localizado no mapa.');
-            // Registrado antes da espera: se o retorno falhar, o intervalo retoma daqui.
-            setPendingReconnectReturn(previousHunt);
-            logAutoReconnectStatus(`Hunt sem resposta. Em ${scratchStop} por 10 segundos antes de voltar para ${previousHunt}…`);
-            await new Promise(resolve => setTimeout(resolve, 10000));
-            if (!await teleportForReconnect(previousHunt)) {
-                throw new Error(`O retorno para ${previousHunt} não foi confirmado.`);
-            }
-            clearPendingReconnectReturn();
-            lastHuntSocketActivityAt = Date.now();
-            logAutoReconnectStatus(`De volta em ${previousHunt}.`);
-        } catch (error) {
-            console.warn('Falha no auto-reconnect da hunt:', error);
-            // Se o personagem continua numa hunt, o próprio intervalo tenta de novo
-            // em 60 segundos; recarregar a página aqui seria mais destrutivo que o
-            // problema. O reload fica só para quando ele parou fora de uma hunt.
-            if (isInHuntContext()) {
-                logAutoReconnectStatus(`${error.message} Nova tentativa em 60 segundos.`, true);
-            } else {
-                logAutoReconnectStatus(`Não foi possível concluir o auto-reconnect: ${error.message}`, true);
-                setTimeout(() => location.reload(), 1500);
-            }
-        } finally {
-            autoReconnectInProgress = false;
-        }
-    }, 5000);
+        if (now - lastHuntSocketActivityAt < HUNT_SILENCE_MS) return;
+        if (now - lastAutoReconnectAt < RECONNECT_COOLDOWN_MS) return;
+        // A janela de análise aberta mantém isInHuntContext() verdadeiro mesmo com o
+        // personagem parado numa cidade; reentrar na hunt ali seria arrastá-lo para
+        // fora do lugar onde ele escolheu ficar.
+        if (isCityName(getCurrentHuntLocation())) return;
+        await rejoinCurrentHunt('Hunt sem resposta por 10 segundos.');
+    }, RECONNECT_CHECK_INTERVAL_MS);
 
     async function requestFreshGameEvent(type, requestType, { timeoutMs = 3500, attempts = 2 } = {}) {
         for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -279,7 +353,7 @@
     const STORAGE_PRIMARY_FAVORITE = 'script_primary_favorite_v1';
     const STORAGE_GAME_FONT = 'script_game_font_v1';
     const STORAGE_AUTO_RECONNECT = 'script_auto_reconnect_v1';
-    const STORAGE_RECONNECT_PENDING = 'script_reconnect_pending_v1';
+    const STORAGE_RECONNECT_SLUG = 'script_reconnect_hunt_slug_v1';
     const STORAGE_CUSTOM_SCROLLBARS = 'script_custom_scrollbars_v1';
     const STORAGE_UNIFIED_FONTS = 'script_unified_fonts_v1';
     const STORAGE_COMPARE_WINDOW = 'script_compare_window_v1';
@@ -1955,181 +2029,6 @@
         if (huntName) saveLastHunt(huntName);
     }
 
-    // O retorno pendente precisa sobreviver ao location.reload(): sem isso o jogador
-    // reaparece na hunt de escala, que gera XP, renova o timer de inatividade e faz o
-    // auto-reconnect nunca mais disparar — deixando-o farmando a hunt errada em silêncio.
-    // `reloaded` garante que a página seja recarregada no máximo uma vez por pendência,
-    // evitando um ciclo de reloads. Pendências velhas são descartadas porque o jogador
-    // pode ter mudado de hunt por conta própria entre uma sessão e outra.
-    const RECONNECT_PENDING_TTL_MS = 10 * 60 * 1000;
-    function getPendingReconnectReturn() {
-        const stored = localStorage.getItem(STORAGE_RECONNECT_PENDING);
-        if (!stored) return null;
-        try {
-            const pending = JSON.parse(stored);
-            if (!pending || typeof pending.hunt !== 'string' || !pending.hunt) throw new Error('formato inválido');
-            if (Date.now() - Number(pending.savedAt || 0) > RECONNECT_PENDING_TTL_MS) throw new Error('expirado');
-            return { hunt: pending.hunt, attempts: Number(pending.attempts) || 0, reloaded: Boolean(pending.reloaded) };
-        } catch {
-            localStorage.removeItem(STORAGE_RECONNECT_PENDING);
-            return null;
-        }
-    }
-
-    function setPendingReconnectReturn(hunt, { attempts = 0, reloaded = false } = {}) {
-        localStorage.setItem(STORAGE_RECONNECT_PENDING, JSON.stringify({ hunt, attempts, reloaded, savedAt: Date.now() }));
-    }
-
-    function clearPendingReconnectReturn() {
-        localStorage.removeItem(STORAGE_RECONNECT_PENDING);
-    }
-
-    function getCurrentHuntNameForReconnect() {
-        const currentMarkerName = document.querySelector('.hunt-marker.here .hunt-name')?.textContent?.trim();
-        if (currentMarkerName && !isCityName(currentMarkerName)) return currentMarkerName;
-        const hudHunt = resolveHuntNameFromHud();
-        if (hudHunt) return hudHunt;
-        const lastHunt = getLastHunt();
-        return lastHunt && !isCityName(lastHunt) ? lastHunt : null;
-    }
-
-    // Um clique despachado não prova que o jogo processou o teleporte, então a chegada
-    // é confirmada pelo HUD. O nome exato do alvo é a única evidência forte; a troca de
-    // local só vale como evidência secundária sob duas condições:
-    //   - havia um local anterior conhecido. Com o HUD vazio (`.phud-tloc` ausente, o que
-    //     acontece justamente quando a conexão cai) qualquer leitura seria "diferente" e
-    //     confirmaria uma chegada que nunca ocorreu;
-    //   - o novo valor se repete em duas leituras seguidas, para que um rótulo com parte
-    //     variável (contador, timer) não seja lido como mudança de lugar.
-    async function waitForArrivalAt(huntName, previousLocation, timeoutMs = 6000) {
-        const targetName = getCleanHuntName(huntName);
-        const deadline = Date.now() + timeoutMs;
-        let previousReading = null;
-        while (Date.now() < deadline) {
-            const current = getCurrentHuntLocation();
-            if (current) {
-                if (targetName && getCleanHuntName(current) === targetName) return true;
-                if (previousLocation && current !== previousLocation && current === previousReading) return true;
-            }
-            previousReading = current;
-            await new Promise(resolve => setTimeout(resolve, 150));
-        }
-        return false;
-    }
-
-    async function teleportForReconnect(huntName, attempts = 3) {
-        for (let attempt = 1; attempt <= attempts; attempt += 1) {
-            const previousLocation = getCurrentHuntLocation();
-            const clicked = await teleportToTarget(huntName, { silent: true });
-            if (clicked && await waitForArrivalAt(huntName, previousLocation)) return true;
-            logAutoReconnectStatus(`Tentativa ${attempt}/${attempts} de ir para ${huntName} não confirmou a chegada.`, true);
-            await new Promise(resolve => setTimeout(resolve, 1200));
-        }
-        return false;
-    }
-
-    // Uma parada em outra hunt (e não numa cidade) mantém isInHuntContext() verdadeiro,
-    // então o auto-reconnect continua armado e tenta de novo sozinho caso o retorno
-    // falhe. Parar numa cidade o desarmava e deixava o jogador preso lá.
-    const RECONNECT_SCRATCH_HUNT = 'Paras';
-
-    // isCityMarker() só entende elementos do DOM (className/dataset), mas aqui os
-    // marcadores são objetos crus da API, onde a marcação de cidade vem em campos
-    // próprios. Sem esta checagem, uma cidade fora de CITY_NAMES seria escolhida como
-    // parada intermediária — e parar numa cidade é exatamente o que desarma o
-    // auto-reconnect e prende o jogador fora da hunt.
-    function isCityMarkerData(marker) {
-        const metadata = [marker?.type, marker?.category, marker?.kind, marker?.markerType, marker?.tag, marker?.group]
-            .filter(value => typeof value === 'string').join(' ');
-        return /\b(?:city|cidade|town|vila|village)\b/i.test(metadata);
-    }
-
-    function readMarkerLevel(marker) {
-        for (const value of [marker?.level, marker?.requiredLevel, marker?.minLevel]) {
-            const parsed = Number(value);
-            if (Number.isFinite(parsed) && parsed > 0) return parsed;
-        }
-        return NaN;
-    }
-
-    // Exige evidência positiva de que o marcador é uma hunt, em vez de apenas confiar
-    // na ausência de sinais de cidade: precisa do slug que clickMappedHunt() usa e de
-    // um nível declarado, que hunts têm e cidades não. Se nada passar no filtro, quem
-    // chama recai em Cerulean — o comportamento antigo, conhecido e seguro.
-    function isReconnectScratchCandidate(marker, name) {
-        if (!name || !getMarkerSlug(marker)) return false;
-        if (isCityMarker(marker, name) || isCityMarkerData(marker)) return false;
-        return Number.isFinite(readMarkerLevel(marker));
-    }
-
-    function pickReconnectScratchHunt(currentHuntName) {
-        const currentName = getCleanHuntName(currentHuntName);
-        const trainerLevel = cachedTrainerLevel || readTrainerLevelFromDOM() || 1;
-        const candidates = [];
-        for (const marker of new Set(globalHuntMarkerData.values())) {
-            const name = getMarkerName(marker);
-            const cleanName = getCleanHuntName(name);
-            if (!cleanName || cleanName === currentName || !isReconnectScratchCandidate(marker, name)) continue;
-            const requiredLevel = readMarkerLevel(marker);
-            if (requiredLevel > trainerLevel) continue;
-            candidates.push({ name, cleanName, requiredLevel });
-        }
-        if (!candidates.length) return null;
-        const preferred = candidates.find(entry => entry.cleanName === getCleanHuntName(RECONNECT_SCRATCH_HUNT));
-        if (preferred) return preferred.name;
-        candidates.sort((a, b) => a.requiredLevel - b.requiredLevel || a.name.localeCompare(b.name));
-        return candidates[0].name;
-    }
-
-    async function teleportToScratchStopForReconnect(currentHuntName) {
-        await loadMapMarkersData();
-        await loadTrainerLevel();
-        const scratchHunt = pickReconnectScratchHunt(currentHuntName);
-        if (scratchHunt && await teleportForReconnect(scratchHunt, 2)) return scratchHunt;
-        logAutoReconnectStatus('Nenhuma hunt de escala disponível; usando Cerulean.', true);
-        return await teleportToCeruleanForReconnect() ? 'Cerulean' : null;
-    }
-
-    async function teleportToCeruleanForReconnect() {
-        await loadMapMarkersData();
-        const waitForHuntExit = async () => {
-            const deadline = Date.now() + 5000;
-            while (Date.now() < deadline) {
-                if (!document.querySelector('[data-guide="capture-bar"]')) return true;
-                await new Promise(resolve => setTimeout(resolve, 100));
-            }
-            return !document.querySelector('[data-guide="capture-bar"]');
-        };
-        const mapButton = document.querySelector('button[data-guide="dock-map"]');
-        let mapWindow = document.querySelector('.map-window');
-        if (!mapWindow?.getClientRects().length) {
-            mapButton?.click();
-            mapWindow = await waitForElement('.map-window', 1500);
-        }
-        if (!mapWindow) return false;
-
-        const directMarker = Array.from(mapWindow.querySelectorAll('[data-guide]')).find(element =>
-            /cerulean/i.test(element.dataset.guide || '')
-        );
-        const labeledMarker = Array.from(mapWindow.querySelectorAll('button, [role="button"], .map-city, .map-marker, .hunt-marker')).find(element =>
-            /^(?:cerulean|cerulean city)$/i.test(element.textContent.trim())
-        );
-        const mappedEntry = Array.from(globalHuntMarkerData.entries()).find(([key, marker]) =>
-            /cerulean/i.test(key) || /cerulean/i.test(getMarkerName(marker)) || /cerulean/i.test(getMarkerSlug(marker))
-        );
-
-        const target = directMarker || labeledMarker;
-        if (target) {
-            target.click();
-            if (await waitForHuntExit()) return true;
-        }
-        if (mappedEntry) {
-            await teleportToTarget(getMarkerName(mappedEntry[1]) || mappedEntry[0]);
-            return waitForHuntExit();
-        }
-        return false;
-    }
-
     function getActivePokemonName() {
         const nameEl = document.querySelector('.phud-name');
         if (cachedLeaderPokemonName) return cachedLeaderPokemonName;
@@ -2497,7 +2396,7 @@
                         toggleRow({
                             className: 'cfg-auto-reconnect', checked: isAutoReconnectActive(),
                             title: 'Auto-reconnect da hunt',
-                            description: 'Quando a hunt para de responder, faz uma parada de 10 segundos em outra hunt de nível baixo e retorna para a hunt original.'
+                            description: 'Quando a hunt fica 10 segundos sem responder, sai e entra de novo na mesma hunt pelo WebSocket, sem passar por outra hunt.'
                         }),
                         prefToggle('cfg-compare-window', STORAGE_COMPARE_WINDOW, 'Comparação de hunts', 'Exibe a janela móvel e redimensionável de comparação.'),
                         sublistRow({

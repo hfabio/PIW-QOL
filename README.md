@@ -346,18 +346,19 @@ Ele vem **desativado**. Ligue em **Configurações → Script Mods → Hunts →
 
 Como funciona:
 
-1. o script observa a atividade da hunt e, após 30 segundos sem nenhum sinal, considera que ela travou;
-2. teleporta para outra hunt de nível baixo que seu personagem já possa acessar;
-3. espera 10 segundos ali;
-4. volta para a hunt original e confirma a chegada.
+1. o script acompanha as mensagens da hunt no WebSocket e, após 10 segundos sem nenhum sinal, considera que ela travou;
+2. envia `leave-hunt` e, meio segundo depois, `enter-hunt` com o slug da hunt em que você já estava;
+3. o personagem volta a caçar no mesmo lugar, sem passar por nenhuma outra hunt.
 
-A parada intermediária é uma **hunt**, e não uma cidade, de propósito: assim o recurso continua ativo durante a manobra e consegue tentar de novo caso o retorno falhe. Se nenhuma hunt de nível baixo estiver disponível, ele usa Cerulean.
+Antes de reentrar, o script confere onde você está: o nome exibido no HUD é traduzido em slug pelos marcadores do mapa, e é esse valor que ele usa. O slug também é guardado no navegador quando o jogo envia o `enter-hunt` da sua escolha no mapa, mas essa cópia só entra em cena se o HUD estiver vazio — o que acontece justamente quando a conexão cai. A conferência evita duas armadilhas: reentrar numa hunt aberta em outra aba (o navegador guarda um slug só, para todas elas) e arrastar você de volta para a hunt enquanto está numa cidade com a janela de análise aberta.
 
-Se o retorno não se confirmar, o script insiste por conta própria — o destino fica guardado no navegador e sobrevive até a um recarregamento da página. Depois de algumas tentativas sem sucesso, ele desiste e avisa no console para você voltar manualmente pelo mapa.
+Se o lugar não for reconhecido como hunt, o script não envia nada e avisa uma vez no console.
+
+Quando o próprio WebSocket cai não há como enviar nada: nesse caso o script espera 45 segundos pela reconexão do jogo e, se ela não vier, recarrega a página.
 
 O andamento é registrado no console do navegador com o prefixo `[PIW-QOL] Auto-reconnect:`, útil para entender o que aconteceu enquanto você estava longe.
 
-> O recurso não joga por você: ele apenas refaz o trajeto até a hunt em que você já estava.
+> O recurso não joga por você: ele apenas recoloca você na hunt em que já estava.
 
 ## Pokédex
 
