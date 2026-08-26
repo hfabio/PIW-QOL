@@ -3700,6 +3700,10 @@
                 label.textContent = kind === 'item'
                     ? `${entry.name || `Item #${entry.itemId}`} · ${Number(entry.quantity || 0).toLocaleString('pt-BR')}`
                     : `${entry.name || entry.speciesId} · Nv ${Number(entry.level || 0)} · IV ${Number(entry.ivTotal || 0)} · ${formatPokemonQualityWithPotential(entry.quality, entry.ivTotal)}${direction === 'deposit' ? ` · ${entry.team ? 'Equipe' : 'Box'}` : ''}`;
+                if (kind === 'pokemon') {
+                    const rarity = getPokemonQualityInfo(entry.quality);
+                    if (rarity) label.style.color = rarity.color;
+                }
                 const action = document.createElement('span');
                 action.style.cssText = 'color:#64c8ff;font-size:12px;font-weight:800;';
                 action.textContent = direction === 'deposit' ? 'Depositar →' : '← Retirar';
@@ -3845,6 +3849,10 @@
                 label.textContent = isPokemon
                     ? `${entry.name || entry.pokeId} · Nv ${Number(entry.level || 0)} · IV ${Number(entry.ivTotal || 0)} · ${formatPokemonQualityWithPotential(entry.quality, entry.ivTotal)}`
                     : `${entry.name} · ${Number(entry.quantity || 0).toLocaleString('pt-BR')}`;
+                if (isPokemon) {
+                    const rarity = getPokemonQualityInfo(entry.quality);
+                    if (rarity) label.style.color = rarity.color;
+                }
                 const action = document.createElement('span');
                 action.style.cssText = 'color:#64c8ff;font-size:12px;font-weight:800;';
                 action.textContent = direction === 'store' ? 'Guardar →' : '← Retirar';
@@ -4024,7 +4032,7 @@
         const backdrop = document.createElement('div');
         backdrop.className = 'sell-confirm-backdrop hunt-sell-backdrop';
         backdrop.innerHTML = `
-            <div class="sell-confirm-modal" style="width:460px; max-width:94vw;">
+            <div class="sell-confirm-modal" style="width:550px; max-width:94vw;">
                 <div class="sell-confirm-title">
                     <span>🛒 Vender itens</span>
                     <button class="hunt-pokemon-open mk-bulk-btn" type="button" style="margin-left:auto;">🐾 Pokémon</button>
@@ -4248,7 +4256,7 @@
         const backdrop = document.createElement('div');
         backdrop.className = 'sell-confirm-backdrop hunt-sell-backdrop';
         backdrop.innerHTML = `
-            <div class="sell-confirm-modal" style="width:500px; max-width:94vw;">
+            <div class="sell-confirm-modal" style="width:550px; max-width:94vw;">
                 <div class="sell-confirm-title">
                     <span>🐾 Vender Pokémon</span>
                     <button class="hunt-items-open mk-bulk-btn" type="button" style="margin-left:auto;">🎒 Itens</button>
@@ -4355,7 +4363,7 @@
                 ].filter(Boolean).join(' ');
                 const quality = formatPokemonQualityWithPotential(poke.quality, poke.ivTotal, poke.shiny);
                 name.append(
-                    document.createTextNode(`${poke.name || `Pokémon ${poke.speciesId}`} · IV ${poke.ivTotal ?? '—'} · `)
+                    document.createTextNode(`${poke.name || `Pokémon ${poke.speciesId}`} · Nv ${poke.level ?? '—'} · IV ${poke.ivTotal ?? '—'} · `)
                 );
                 const rarityInfo = getPokemonQualityInfo(poke.quality);
                 if (rarityInfo) {
