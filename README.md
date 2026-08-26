@@ -19,7 +19,7 @@ O script melhora a tela do jogo e reúne funções que normalmente exigiriam vá
 - melhorar a Pokédex e o Hunt Analyzer;
 - escolher quais modificações deseja usar.
 
-A versão 10.1.1 mantém o auto-reconnect corrigido, adiciona imagens dos Pokémon na lista de venda e mantém a busca de hunts compatível com as novas abas visuais de áreas do mapa. A porcentagem de potencial passou a vir desativada por padrão, e a opção "Proteção por cadeado" foi removida porque o próprio jogo já cuida disso. Ela também reduz o consumo de CPU do script durante as hunts, corrigindo duas rotinas que ficavam trabalhando sem parar em segundo plano — veja [Desempenho](#desempenho).
+A versão 10.1.1 mantém o auto-reconnect corrigido, adiciona imagens dos Pokémon na lista de venda e mantém a busca de hunts compatível com as novas abas visuais de áreas do mapa. A porcentagem de potencial passou a vir desativada por padrão, e a opção "Proteção por cadeado" foi removida porque o próprio jogo já cuida disso. Ela também reduz o consumo de CPU do script durante as hunts, corrigindo duas rotinas que ficavam trabalhando sem parar em segundo plano.
 
 Você não precisa saber programar. Depois de instalado, o script funciona dentro do próprio jogo.
 
