@@ -360,6 +360,7 @@
     const STORAGE_MARK_QUICK_BUY = 'script_mark_quick_buy_v1';
     const STORAGE_MARK_QUALITY_PICKER = 'script_mark_quality_picker_v1';
     const STORAGE_SHOW_QUALITY_POTENTIAL = 'script_show_quality_potential_v1';
+    const STORAGE_SHOW_POKEMON_SELL_ICON = 'script_show_pokemon_sell_icon_v1';
     const STORAGE_CUSTOM_FONT = 'script_custom_font_v1';
     const STORAGE_CUSTOM_FONT_NAME = 'script_custom_font_name_v1';
     const CUSTOM_FONT_FAMILY = 'PIW Uploaded Font';
@@ -1452,6 +1453,7 @@
         .hunt-sell-row[hidden] { display: none !important; }
         .hunt-sell-row input[type="number"] { width: 100%; box-sizing: border-box; background: #0c161f; color: #e2e8f0; border: 1px solid #273f52; border-radius: 4px; padding: 5px; }
         .hunt-sell-row.protected { opacity: 0.45; }
+        .hunt-pokemon-sell-icon { width: 28px; height: 28px; object-fit: contain; image-rendering: pixelated; }
 
         .sell-confirm-backdrop { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.5); z-index: 10150; display: flex; align-items: center; justify-content: center; }
         .sell-confirm-modal { background: #0c161f; border: 1px solid #273f52; border-radius: 8px; padding: 0; color: #e2e8f0; width: 320px; box-shadow: 0 12px 32px rgba(0,0,0,0.8); overflow: hidden; }
@@ -2420,7 +2422,9 @@
 
                     ${category('🐾', 'Pokémon', [
                         prefToggle('cfg-show-quality-potential', STORAGE_SHOW_QUALITY_POTENTIAL, 'Porcentagem de potencial',
-                            'Exibe uma estimativa (75% qualidade + 25% IV) junto à qualidade no time, log de capturas e venda em massa. Não é um valor oficial do jogo, mas estima a força do Pokémon.')
+                            'Exibe uma estimativa (75% qualidade + 25% IV) junto à qualidade no time, log de capturas e venda em massa. Não é um valor oficial do jogo, mas estima a força do Pokémon.'),
+                        prefToggle('cfg-show-pokemon-sell-icon', STORAGE_SHOW_POKEMON_SELL_ICON, 'Imagem na venda de Pokémon',
+                            'Exibe a imagem da Pokédex antes do nome na tela de venda da hunt.')
                     ])}
 
                     ${category('🛡️', 'Proteções e vendas', [
@@ -4204,7 +4208,8 @@
                 const protectedPoke = Boolean(isNativeLocked(poke) || poke.shiny || poke.market || poke.listed);
                 const row = document.createElement('label');
                 row.className = `hunt-sell-row${protectedPoke ? ' protected' : ''}`;
-                row.style.gridTemplateColumns = 'auto 1fr auto auto';
+                const showPokemonSellIcon = preferenceEnabled(STORAGE_SHOW_POKEMON_SELL_ICON);
+                row.style.gridTemplateColumns = showPokemonSellIcon ? 'auto 30px minmax(0, 1fr) auto auto' : 'auto minmax(0, 1fr) auto auto';
                 row.dataset.searchName = String(poke.name || '').toLocaleLowerCase();
                 row.dataset.shiny = poke.shiny ? 'true' : 'false';
                 row.dataset.iv = String(Number(poke.ivTotal) || 0);
@@ -4216,6 +4221,21 @@
                 checkbox.dataset.pokeId = String(poke.id);
                 checkbox.dataset.value = String(poke.sellValue || 0);
 
+                let pokemonIcon = null;
+                if (showPokemonSellIcon) {
+                    const iconUrl = getPokemonIconUrl(poke.speciesId);
+                    if (iconUrl) {
+                        pokemonIcon = document.createElement('img');
+                        pokemonIcon.className = 'hunt-pokemon-sell-icon';
+                        pokemonIcon.src = iconUrl;
+                        pokemonIcon.alt = '';
+                        pokemonIcon.addEventListener('error', () => {
+                            pokemonIcon.remove();
+                            row.style.gridTemplateColumns = 'auto minmax(0, 1fr) auto auto';
+                        }, { once: true });
+                    }
+                }
+
                 const name = document.createElement('span');
                 const flags = [
                     poke.shiny ? '✨' : '',
@@ -4223,7 +4243,20 @@
                     (poke.market || poke.listed) ? '🏷️' : ''
                 ].filter(Boolean).join(' ');
                 const quality = formatPokemonQualityWithPotential(poke.quality, poke.ivTotal, poke.shiny);
-                name.textContent = `${poke.name || `Pokémon ${poke.speciesId}`} · IV ${poke.ivTotal ?? '—'} · ${quality} ${flags}`;
+                name.append(
+                    document.createTextNode(`${poke.name || `Pokémon ${poke.speciesId}`} · IV ${poke.ivTotal ?? '—'} · `)
+                );
+                const rarityInfo = getPokemonQualityInfo(poke.quality);
+                if (rarityInfo) {
+                    const rarity = document.createElement('span');
+                    rarity.textContent = quality;
+                    rarity.style.color = rarityInfo.color;
+                    rarity.style.fontWeight = '800';
+                    name.append(rarity);
+                } else {
+                    name.append(document.createTextNode(quality));
+                }
+                name.append(document.createTextNode(` ${flags}`));
 
                 const value = document.createElement('strong');
                 value.textContent = `💲${Number(poke.sellValue).toLocaleString('pt-BR')}`;
@@ -4242,7 +4275,9 @@
                         updateSummary();
                     } catch (error) { showWindowMessage(backdrop.querySelector('.sell-confirm-modal'), error.message, true); }
                 });
-                row.append(checkbox, name, value, lock);
+                row.append(checkbox);
+                if (pokemonIcon) row.append(pokemonIcon);
+                row.append(name, value, lock);
                 list.appendChild(row);
             });
 
