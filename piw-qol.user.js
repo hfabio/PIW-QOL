@@ -5993,10 +5993,18 @@
     }
 
     let huntAnalyzerRenderRefreshPending = false;
-    function refreshHuntAnalyzerGameRender() {
+    let lastHuntAnalyzerRenderRefreshAt = 0;
+    // Pedir o re-render a cada tick do observer criava um ciclo que se alimentava
+    // sozinho: o render mexia no DOM, o observer disparava e pedia outro render, umas
+    // quatro vezes por segundo enquanto o analisador estivesse aberto. O intervalo
+    // minimo corta esse ciclo; voltar para a aba ainda forca a atualizacao na hora.
+    const HUNT_ANALYZER_RENDER_REFRESH_INTERVAL_MS = 4000;
+    function refreshHuntAnalyzerGameRender({ force = false } = {}) {
         if (huntAnalyzerRenderRefreshPending || document.hidden) return;
+        if (!force && Date.now() - lastHuntAnalyzerRenderRefreshAt < HUNT_ANALYZER_RENDER_REFRESH_INTERVAL_MS) return;
         if (!document.querySelector('.ha-window:not(.ha-compare-modal)')) return;
         huntAnalyzerRenderRefreshPending = true;
+        lastHuntAnalyzerRenderRefreshAt = Date.now();
         setTimeout(() => {
             try {
                 const event = new Event('visibilitychange');
@@ -6009,9 +6017,9 @@
     }
 
     document.addEventListener('visibilitychange', event => {
-        if (!event.piwQolRenderRefresh && !document.hidden) refreshHuntAnalyzerGameRender();
+        if (!event.piwQolRenderRefresh && !document.hidden) refreshHuntAnalyzerGameRender({ force: true });
     });
-    window.addEventListener('focus', refreshHuntAnalyzerGameRender);
+    window.addEventListener('focus', () => refreshHuntAnalyzerGameRender({ force: true }));
 
     function showCompareModal() {
         const curr = currentHuntSnapshot || { defeated: 0, timeText: '0s', balance: 0, balHour: 0, xpHour: 0, killsHour: 0, xpGained: 0, locName: 'Nenhuma' };
@@ -6327,6 +6335,10 @@
     function findCaptureLogWindow() {
         const nativeWindow = document.querySelector('.clog-window');
         if (nativeWindow) return nativeWindow;
+        // Sem nenhuma .clog-row no documento nao ha o que anotar, e a busca por texto
+        // abaixo percorre todos os nos do body. Rodava a cada tick do observer so para
+        // nao encontrar nada, porque a janela de capturas fica fechada quase sempre.
+        if (!document.querySelector('.clog-row')) return null;
         const titlePattern = /(?:log\s*de\s*capturas|capture\s*log)/i;
         const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
         let titleNode = null;

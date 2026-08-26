@@ -19,7 +19,7 @@ O script melhora a tela do jogo e reúne funções que normalmente exigiriam vá
 - melhorar a Pokédex e o Hunt Analyzer;
 - escolher quais modificações deseja usar.
 
-A versão 10.1.1 mantém o auto-reconnect corrigido, adiciona imagens dos Pokémon na lista de venda e mantém a busca de hunts compatível com as novas abas visuais de áreas do mapa. A porcentagem de potencial passou a vir desativada por padrão, e a opção "Proteção por cadeado" foi removida porque o próprio jogo já cuida disso.
+A versão 10.1.1 mantém o auto-reconnect corrigido, adiciona imagens dos Pokémon na lista de venda e mantém a busca de hunts compatível com as novas abas visuais de áreas do mapa. A porcentagem de potencial passou a vir desativada por padrão, e a opção "Proteção por cadeado" foi removida porque o próprio jogo já cuida disso. Ela também reduz o consumo de CPU do script durante as hunts, corrigindo duas rotinas que ficavam trabalhando sem parar em segundo plano — veja [Desempenho](#desempenho).
 
 Você não precisa saber programar. Depois de instalado, o script funciona dentro do próprio jogo.
 
@@ -309,7 +309,7 @@ O modo compacto e a exibição de drops são lembrados pelo navegador.
 
 O painel reduzido pode ser redimensionado pelo canto. Quando os drops estão visíveis, a lista aproveita a altura disponível conforme a janela é expandida.
 
-O Analyzer também funciona no modo de batalha **Cartas**. Ao retornar para a aba do jogo, o mod resincroniza a visibilidade da renderização para evitar que a tela permaneça no estado escuro de economia de recursos.
+O Analyzer também funciona no modo de batalha **Cartas**. Ao retornar para a aba do jogo, o mod resincroniza a visibilidade da renderização para evitar que a tela permaneça no estado escuro de economia de recursos. Essa resincronização acontece ao voltar para a aba e, fora isso, no máximo uma vez a cada quatro segundos.
 
 O comparador mantém o botão de fechar separado das demais ações. A opção de limpar o histórico fica junto do histórico recente, evitando sobreposição em janelas menores.
 
