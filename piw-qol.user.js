@@ -833,6 +833,64 @@
         return `/assets/items/${String(icon).replace(/^\/+/, '')}`;
     }
 
+    // Caminhos ja confirmados no jogo: evita a cascata de 404 do fallback abaixo.
+    const KNOWN_STONE_ICON_URLS = {
+        fire_stone: '/assets/items/fire_stone.gif',
+        feather_stone: '/assets/stones/feather_stone.png',
+        leaf_stone: '/assets/items/leaf_stone.gif',
+        rock_stone: '/assets/items/rock_stone.gif',
+        enigma_stone: '/assets/items/enigma_stone.gif',
+        cocoon_stone: '/assets/items/cocoon_stone.gif',
+        thunder_stone: '/assets/items/thunder_stone.gif',
+        earth_stone: '/assets/items/earth_stone.gif',
+        crystal_stone: '/assets/items/crystal_stone.gif',
+        metal_stone: '/assets/stones/metal_stone.png',
+        ancient_stone: '/assets/stones/ancient_stone.gif',
+        water_stone: '/assets/items/water_stone.gif',
+        heart_stone: '/assets/items/heart_stone.gif',
+        skull_stone: '/assets/items/skull_stone.png',
+        ice_stone: '/assets/items/ice_stone.gif',
+        punch_stone: '/assets/items/punch_stone.gif',
+        darkness_stone: '/assets/items/darkness_stone.gif',
+        venom_stone: '/assets/items/venom_stone.gif',
+        deep_stone: '/assets/items/deep_stone.png',
+        flower_stone: '/assets/items/flower_stone.png',
+        aqua_stone: '/assets/items/aqua_stone.png',
+        champion_stone: '/assets/items/champion_stone.png',
+        voltage_stone: '/assets/items/voltage_stone.png',
+        pixie_stone: '/assets/items/pixie_stone.png',
+        tortoise_stone: '/assets/items/tortoise_stone.png',
+        aroma_stone: '/assets/items/aroma_stone.png'
+    };
+
+    function getMarketItemIconHTML(name, entry, ref, category) {
+        const cleanName = String(name || '').trim().toLowerCase();
+        if (cleanName === 'diamonds' || String(category || '').toLowerCase() === 'diamonds') {
+            return '<span class="market-item-emoji" aria-hidden="true">💎</span>';
+        }
+        if (/\bstone\b/.test(cleanName) || /stones?/i.test(category)) {
+            const stoneKey = cleanName.replace(/\s+/g, '_');
+            const stoneSlug = encodeURIComponent(stoneKey);
+            // Alguns devs largaram stones fora de /assets/stones/, entao tentamos os dois diretorios e as duas extensoes.
+            const [firstSource, ...fallbackSources] = [...new Set([
+                KNOWN_STONE_ICON_URLS[stoneKey],
+                `/assets/stones/${stoneSlug}.png`,
+                `/assets/stones/${stoneSlug}.gif`,
+                `/assets/items/${stoneSlug}.gif`,
+                `/assets/items/${stoneSlug}.png`
+            ].filter(Boolean))];
+            return `<img class="market-item-icon" src="${firstSource}" data-icon-fallbacks="${escapeHTML(JSON.stringify(fallbackSources))}" alt="">`;
+        }
+        if (cleanName === 'idle ball') {
+            return '<img class="market-item-icon" src="/assets/markitems/idleball.png" alt="">';
+        }
+        const item = globalItemApiData.get(cleanName);
+        const iconSource = entry?.icon || ref?.icon || item?.icon || item?.image || item?.sprite || item?.img || '';
+        return iconSource
+            ? `<img class="market-item-icon" src="${escapeHTML(normalizeGameItemIcon(iconSource))}" alt="">`
+            : '<span class="market-item-emoji" aria-hidden="true">🌿</span>';
+    }
+
     function getMarkerName(marker) {
         return String(
             marker?.name || marker?.title || marker?.huntName || marker?.pokemonName ||
@@ -1459,6 +1517,7 @@
         .hunt-sell-row input[type="number"] { width: 100%; box-sizing: border-box; background: #0c161f; color: #e2e8f0; border: 1px solid #273f52; border-radius: 4px; padding: 5px; }
         .hunt-sell-row.protected { opacity: 0.45; }
         .hunt-pokemon-sell-icon { width: 28px; height: 28px; object-fit: contain; image-rendering: pixelated; }
+        .hunt-item-sell-icon { width: 28px; height: 28px; object-fit: contain; flex: none; }
 
         .sell-confirm-backdrop { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.5); z-index: 10150; display: flex; align-items: center; justify-content: center; }
         .sell-confirm-modal { background: #0c161f; border: 1px solid #273f52; border-radius: 8px; padding: 0; color: #e2e8f0; width: 320px; box-shadow: 0 12px 32px rgba(0,0,0,0.8); overflow: hidden; }
@@ -1543,7 +1602,11 @@
         .market-sell-row { width:100%;display:grid;grid-template-columns:42px 1fr;gap:10px;align-items:center;text-align:left;background:#14222d;color:#e2e8f0;border:1px solid #1f3545;border-radius:7px;padding:8px 10px; }
         .market-sell-row:hover,.market-sell-row.on { border-color:#c8a24e;background:#1b2c39; }
         .market-sell-row img { width:38px;height:38px;object-fit:contain; }
+        .market-list .market-pokemon-icon { width:38px;height:38px;object-fit:contain;image-rendering:pixelated;flex:none; }
+        .market-list .market-item-icon { width:38px;height:38px;object-fit:contain;flex:none; }
+        .market-list .market-item-emoji { width:38px;height:38px;display:inline-flex;align-items:center;justify-content:center;flex:none;font-size:24px; }
         .market-sell-row small { display:block;color:#9fb0bd;margin-top:3px; }
+        .mk-row .script-mark-product-icon { width:34px;height:34px;object-fit:contain;flex:none; }
         .script-quality-multiselect { position:relative;display:inline-block;z-index:8; }
         .script-quality-toggle { min-width:170px;text-align:left; }
         .script-quality-dropdown { position:absolute;min-width:190px;padding:7px;background:#101b24;border:1px solid #7a5a27;border-radius:6px;box-shadow:0 8px 22px #000b;display:grid;gap:3px;z-index:100000;pointer-events:auto; }
@@ -4010,6 +4073,7 @@
                                 qty: Number(entry.quantity) || 0,
                                 category: String(catalogItem?.category || '').toLowerCase(),
                                 npcPrice: Number(catalogItem?.npcPrice) || 0,
+                                icon: catalogItem?.icon || catalogItem?.image || catalogItem?.sprite || '',
                                 locked: isNativeLocked(entry)
                             };
                         }).filter(item => item.qty > 0 && item.npcPrice > 0)
@@ -4030,7 +4094,7 @@
                 const isProtected = Boolean(protectionReason);
                 const row = document.createElement('label');
                 row.className = `hunt-sell-row${isProtected ? ' protected' : ''}`;
-                row.style.gridTemplateColumns = 'auto 1fr 90px auto';
+                row.style.gridTemplateColumns = 'auto 30px minmax(0, 1fr) 90px auto';
 
                 const checkbox = document.createElement('input');
                 checkbox.type = 'checkbox';
@@ -4040,6 +4104,17 @@
                 checkbox.dataset.unitPrice = String(item.npcPrice);
 
                 const name = document.createElement('span');
+                name.style.cssText = 'min-width:0;';
+                const itemIcon = document.createElement('img');
+                itemIcon.className = 'hunt-item-sell-icon';
+                itemIcon.src = normalizeGameItemIcon(
+                    item.icon
+                    || globalItemApiData.get(String(item.itemId))?.icon
+                    || globalItemApiData.get(item.name.toLowerCase())?.icon
+                    || ''
+                );
+                itemIcon.alt = '';
+                itemIcon.addEventListener('error', () => itemIcon.remove(), { once: true });
                 name.textContent = `${item.name} (${item.qty.toLocaleString('pt-BR')}) · 💲${item.npcPrice.toLocaleString('pt-BR')}`;
 
                 const quantity = document.createElement('input');
@@ -4065,7 +4140,7 @@
                         updateSaleSummary();
                     } catch (error) { showWindowMessage(backdrop.querySelector('.sell-confirm-modal'), error.message, true); }
                 });
-                row.append(checkbox, name, quantity, lock);
+                row.append(checkbox, itemIcon, name, quantity, lock);
                 list.appendChild(row);
             });
 
@@ -4641,10 +4716,33 @@
                 const offerOnly = Boolean(entry.offerOnly || price <= 0);
                 const currency = normalizeMarketCurrency(entry.currency || entry.currencyType || ref.currency || ref.currencyType);
                 const currencyIcon = currency === 'DIAMONDS' ? '💎' : '💲';
+                const isPokemon = entry.kind === 'pokemon' || activeCategory === 'Pokemon';
+                const pokemonIconUrl = isPokemon
+                    ? (getPokemonIconUrl(entry.speciesId ?? ref.speciesId ?? entry.pokeId ?? ref.pokeId)
+                        || getPokemonIconUrlByName(name))
+                    : '';
+                const itemIconHTML = isPokemon ? '' : getMarketItemIconHTML(name, entry, ref, activeCategory);
                 row.innerHTML = `
-                    <div><b>${escapeHTML(name)}</b>${details ? `<small style="display:block;color:#90cdf4;margin-top:2px;">${escapeHTML(details)}</small>` : ''}${statText ? `<small style="display:block;color:#a0aec0;margin-top:2px;">${escapeHTML(statText)}</small>` : ''}</div>
+                    <div style="display:flex;align-items:center;gap:9px;min-width:0;">${pokemonIconUrl ? `<img class="market-pokemon-icon" src="${escapeHTML(pokemonIconUrl)}" alt="">` : itemIconHTML}<span style="min-width:0;"><b>${escapeHTML(name)}</b>${details ? `<small style="display:block;color:#90cdf4;margin-top:2px;">${escapeHTML(details)}</small>` : ''}${statText ? `<small style="display:block;color:#a0aec0;margin-top:2px;">${escapeHTML(statText)}</small>` : ''}</span></div>
                     <span style="color:#a0aec0;">${tr('quantity')}: <b style="color:#e2e8f0;">${quantity.toLocaleString(getGameLanguage() === 'pt' ? 'pt-BR' : 'en-US')}</b></span>
                     <b style="color:#f6c453;">${offerOnly ? tr('offerOnly') : `${currencyIcon} ${price.toLocaleString(getGameLanguage() === 'pt' ? 'pt-BR' : 'en-US')}`}</b>`;
+                row.querySelector('.market-pokemon-icon')?.addEventListener('error', event => event.currentTarget.remove(), { once: true });
+                row.querySelector('.market-item-icon')?.addEventListener('error', event => {
+                    const icon = event.currentTarget;
+                    let pendingSources = [];
+                    try { pendingSources = JSON.parse(icon.dataset.iconFallbacks || '[]'); } catch { pendingSources = []; }
+                    const nextSource = pendingSources.shift();
+                    if (nextSource) {
+                        icon.dataset.iconFallbacks = JSON.stringify(pendingSources);
+                        icon.src = nextSource;
+                        return;
+                    }
+                    const fallback = document.createElement('span');
+                    fallback.className = 'market-item-emoji';
+                    fallback.setAttribute('aria-hidden', 'true');
+                    fallback.textContent = /stone/i.test(name) ? '🪨' : '🌿';
+                    icon.replaceWith(fallback);
+                });
                 const buyButton = document.createElement('button');
                 const quantityInput = document.createElement('input');
                 quantityInput.type = 'number';
@@ -5304,6 +5402,32 @@
         });
     }
 
+    async function injectMarkProductIcons(mkWindow) {
+        const buyTab = Array.from(mkWindow.querySelectorAll('.mk-tab'))
+            .some(tab => tab.classList.contains('on') && /Comprar|Buy/i.test(tab.textContent));
+        const rows = Array.from(mkWindow.querySelectorAll('.mk-row')).filter(row => row.querySelector('.mk-name'));
+        if (!buyTab || !rows.length) return;
+        let catalog;
+        try { catalog = await loadMarkCatalog(); } catch { return; }
+        rows.forEach(row => {
+            if (row.querySelector('.script-mark-product-icon, .mk-ico, .mk-icon, img')) return;
+            const name = row.querySelector('.mk-name')?.textContent?.trim();
+            const product = catalog.balls?.find(item => item.name === name)
+                || catalog.items?.find(item => item.name === name);
+            if (!product) return;
+            const iconSource = product.icon || product.iconUrl || product.image || product.sprite;
+            if (!iconSource) return;
+            const icon = document.createElement('img');
+            icon.className = 'script-mark-product-icon';
+            icon.src = normalizeGameItemIcon(iconSource);
+            icon.alt = '';
+            icon.addEventListener('error', () => icon.remove(), { once: true });
+            const info = row.querySelector('.mk-info');
+            if (info?.parentElement === row) row.insertBefore(icon, info);
+            else row.querySelector('.mk-name')?.before(icon);
+        });
+    }
+
     async function injectMarkOwnedQuantities(mkWindow) {
         const buyTab = Array.from(mkWindow.querySelectorAll('.mk-tab'))
             .some(tab => tab.classList.contains('on') && /Comprar|Buy/i.test(tab.textContent));
@@ -5430,6 +5554,7 @@
         const mkWindow = findNativeMarkWindow();
         if (!mkWindow) return;
 
+        injectMarkProductIcons(mkWindow);
         injectMarkBuyQuantities(mkWindow);
         injectMarkOwnedQuantities(mkWindow);
         injectMarkQualityMultiSelect(mkWindow);
