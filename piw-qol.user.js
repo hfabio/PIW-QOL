@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Poke Idle World - Quality of Life (PIW-QOL)
 // @namespace    http://tampermonkey.net/
-// @version      10.1.0
+// @version      10.1.1
 // @description  Suporte a ícones oficiais via items.json, lógica de valores robusta e tooltips esteticamente alinhadas ao jogo.
 // @author       Desjunior (JulianoCLI)
 // @match        https://poke.idleworld.online/play
@@ -802,6 +802,11 @@
         return POKEMON_ITEM_ICONS[id] ? `/assets/pokeitems/${POKEMON_ITEM_ICONS[id]}.png` : '';
     }
 
+    function getPokemonIconUrlByName(name) {
+        const pokemon = globalCreatureApiData.get(getCleanHuntName(name));
+        return getPokemonIconUrl(pokemon?.speciesId ?? pokemon?.pokeId ?? pokemon?.id);
+    }
+
     function updateCachedLeaderPokemon(pokemonList) {
         const leader = pokemonList.find(pokemon => pokemon.leader)
             || pokemonList.filter(pokemon => pokemon.team).sort((a, b) => Number(a.slot ?? 99) - Number(b.slot ?? 99))[0];
@@ -1342,7 +1347,7 @@
         .map-window .script-hidden-native-types {
             display: none !important;
         }
-        .map-window .map-area {
+        .map-window .map-area, .map-window .map-plate {
             border-radius: 9px !important;
             overflow: hidden !important;
         }
@@ -2056,6 +2061,25 @@
         return true;
     }
 
+    function getMapAreaTabs(mapWindow) {
+        return Array.from(mapWindow.querySelectorAll('.map-area:not(.locked), .map-plate:not(.locked)'));
+    }
+
+    function waitForMapAreaChange(previousTab) {
+        return new Promise(resolve => {
+            const deadline = Date.now() + 1200;
+            const check = () => {
+                const activeTab = document.querySelector('.map-area.on, .map-plate.on');
+                if (activeTab && activeTab !== previousTab || Date.now() >= deadline) {
+                    resolve(activeTab);
+                    return;
+                }
+                requestAnimationFrame(check);
+            };
+            check();
+        });
+    }
+
     // Devolve true somente quando um marcador da hunt foi realmente clicado. O
     // auto-reconnect depende dessa distinção para saber se precisa tentar de novo;
     // `silent` evita encher a tela de avisos durante as retentativas automáticas.
@@ -2089,24 +2113,26 @@
 
         // Compatibilidade com versões do jogo nas quais o marcador da área ainda
         // não foi montado no DOM.
-        let allTabs = Array.from(mapWindow.querySelectorAll('.map-area:not(.locked)'));
+        let allTabs = getMapAreaTabs(mapWindow);
         if (allTabs.length === 0) {
             const found = await tryFindMarkerAsync(huntName, 20, 100);
             if (!found) notify(`Hunt "${huntName}" não foi localizada.`, { isError: true });
             return found;
         }
 
-        const activeTab = mapWindow.querySelector('.map-area.on');
+        const activeTab = mapWindow.querySelector('.map-area.on, .map-plate.on');
         if (activeTab) {
             const found = await tryFindMarkerAsync(huntName, 10, 100);
             if (found) return true;
         }
 
-        for (const tab of allTabs) {
-            if (tab === activeTab) continue;
+        for (let tabIndex = 0; tabIndex < allTabs.length; tabIndex += 1) {
+            const tab = getMapAreaTabs(mapWindow)[tabIndex];
+            if (!tab || tab === activeTab) continue;
 
             tab.click();
-            const found = await tryFindMarkerAsync(huntName, 20, 100);
+            await waitForMapAreaChange(activeTab);
+            const found = await tryFindMarkerAsync(huntName, 40, 100);
             if (found) return true;
         }
 
@@ -2774,7 +2800,7 @@
                     lastMapRenderSignature = '';
                     buildSimpleList();
                 });
-                const nativeAreas = mapWindow.querySelectorAll('.map-area');
+                const nativeAreas = mapWindow.querySelectorAll('.map-area, .map-plate');
                 const nativeAreaParent = nativeAreas[0]?.parentElement;
                 (nativeAreaParent || mapBody).appendChild(viewTabs);
                 nativeAreas.forEach(area => area.addEventListener('click', () => {
@@ -3124,6 +3150,16 @@
                     const sprite = document.createElement('div');
                     sprite.style = hunt.iconStyle;
                     spriteContainer.appendChild(sprite);
+                } else {
+                    const spriteUrl = getPokemonIconUrlByName(hunt.name);
+                    if (spriteUrl) {
+                        const sprite = document.createElement('img');
+                        sprite.src = spriteUrl;
+                        sprite.alt = hunt.displayName;
+                        sprite.style = 'width:38px;height:38px;object-fit:contain;image-rendering:pixelated;';
+                        sprite.onerror = () => sprite.remove();
+                        spriteContainer.appendChild(sprite);
+                    }
                 }
 
                 let bottomInfoHTML = '';
