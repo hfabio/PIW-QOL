@@ -4032,7 +4032,7 @@
         const backdrop = document.createElement('div');
         backdrop.className = 'sell-confirm-backdrop hunt-sell-backdrop';
         backdrop.innerHTML = `
-            <div class="sell-confirm-modal" style="width:550px; max-width:94vw;">
+            <div class="sell-confirm-modal" style="width:600px; max-width:94vw;">
                 <div class="sell-confirm-title">
                     <span>🛒 Vender itens</span>
                     <button class="hunt-pokemon-open mk-bulk-btn" type="button" style="margin-left:auto;">🐾 Pokémon</button>
@@ -4256,7 +4256,7 @@
         const backdrop = document.createElement('div');
         backdrop.className = 'sell-confirm-backdrop hunt-sell-backdrop';
         backdrop.innerHTML = `
-            <div class="sell-confirm-modal" style="width:550px; max-width:94vw;">
+            <div class="sell-confirm-modal" style="width:600px; max-width:94vw;">
                 <div class="sell-confirm-title">
                     <span>🐾 Vender Pokémon</span>
                     <button class="hunt-items-open mk-bulk-btn" type="button" style="margin-left:auto;">🎒 Itens</button>
